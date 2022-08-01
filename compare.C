@@ -43,7 +43,8 @@
 	june_complex2_B->SetMarkerStyle(30);
 	june_complex2_B->SetMarkerColor(kViolet+5);
 	*/
-	
+
+	/*
 	TFile* june3_A = TFile::Open("june3_A.root");
 	TCanvas* cjune3_A = (TCanvas*)june3_A->Get("cc");
 	TGraphErrors* june_raw3_A = (TGraphErrors*)cjune3_A->GetListOfPrimitives()->At(5);
@@ -66,6 +67,7 @@
 	june_simple3_B->SetMarkerColor(kAzure+1);
 	june_complex3_B->SetMarkerStyle(28);
 	june_complex3_B->SetMarkerColor(kViolet+5);
+	*/
 	
 	/*
 	TFile* feb_A = TFile::Open("feb_A.root");
@@ -91,14 +93,73 @@
 	feb_complex_B->SetMarkerStyle(3);
 	feb_complex_B->SetMarkerColor(kViolet+5);
 	*/
+
+	TFile* jul_A = TFile::Open("jul_A.root");
+	TCanvas* cjul_A = (TCanvas*)jul_A->Get("cc");
+	TGraphErrors* jul_raw_A = (TGraphErrors*)cjul_A->GetListOfPrimitives()->At(5);
+	TGraphErrors* jul_simple_A = (TGraphErrors*)cjul_A->GetListOfPrimitives()->At(1);
+	TGraphErrors* jul_complex_A = (TGraphErrors*)cjul_A->GetListOfPrimitives()->At(3);
+	
+	jul_raw_A->SetMarkerStyle(30);
+	jul_simple_A->SetMarkerStyle(30);
+	jul_complex_A->SetMarkerStyle(30);
+	
+	TFile* jul_B = TFile::Open("jul_B.root");
+	TCanvas* cjul_B = (TCanvas*)jul_B->Get("cc");
+	TGraphErrors* jul_raw_B = (TGraphErrors*)cjul_B->GetListOfPrimitives()->At(5);
+	TGraphErrors* jul_simple_B = (TGraphErrors*)cjul_B->GetListOfPrimitives()->At(1);
+	TGraphErrors* jul_complex_B = (TGraphErrors*)cjul_B->GetListOfPrimitives()->At(3);
+	
+	jul_raw_B->SetMarkerStyle(28);
+	jul_simple_B->SetMarkerStyle(28);
+	jul_complex_B->SetMarkerStyle(28);
+	
+	TFile* jul2_A = TFile::Open("jul2_A.root");
+	TCanvas* cjul2_A = (TCanvas*)jul2_A->Get("cc");
+	TGraphErrors* jul2_raw_A = (TGraphErrors*)cjul2_A->GetListOfPrimitives()->At(5);
+	TGraphErrors* jul2_simple_A = (TGraphErrors*)cjul2_A->GetListOfPrimitives()->At(1);
+	TGraphErrors* jul2_complex_A = (TGraphErrors*)cjul2_A->GetListOfPrimitives()->At(3);
+	
+	jul2_raw_A->SetMarkerStyle(30);
+	jul2_raw_A->SetMarkerColor(kMagenta);
+	jul2_simple_A->SetMarkerStyle(30);
+	jul2_simple_A->SetMarkerColor(kAzure+1);
+	jul2_complex_A->SetMarkerStyle(30);
+	jul2_complex_A->SetMarkerColor(kViolet+5);
+	
+	TFile* jul2_B = TFile::Open("jul2_B.root");
+	TCanvas* cjul2_B = (TCanvas*)jul2_B->Get("cc");
+	TGraphErrors* jul2_raw_B = (TGraphErrors*)cjul2_B->GetListOfPrimitives()->At(5);
+	TGraphErrors* jul2_simple_B = (TGraphErrors*)cjul2_B->GetListOfPrimitives()->At(1);
+	TGraphErrors* jul2_complex_B = (TGraphErrors*)cjul2_B->GetListOfPrimitives()->At(3);
+	
+	jul2_raw_B->SetMarkerStyle(28);
+	jul2_raw_B->SetMarkerColor(kMagenta);
+	jul2_simple_B->SetMarkerStyle(28);
+	jul2_simple_B->SetMarkerColor(kAzure+1);
+	jul2_complex_B->SetMarkerStyle(28);
+	jul2_complex_B->SetMarkerColor(kViolet+5);
 	
 	// fit and print curves
+/*
 	std::map<std::string, TGraphErrors*> curves{{"june3_A_raw",june_raw3_A},
 	                                            {"june3_A_simple",june_simple3_A},
 	                                            {"june3_A_complex",june_complex3_A},
 	                                            {"june3_B_raw",june_raw3_B},
 	                                            {"june3_B_simple",june_simple3_B},
 	                                            {"june3_B_complex",june_complex3_B}};
+*/
+	
+	std::map<std::string, TGraphErrors*> curves{};
+	/*
+	std::map<std::string, TGraphErrors*> curves{{"jul_A_raw",jul_raw_A},
+	                                            {"jul_A_simple",jul_simple_A},
+	                                            {"jul_A_complex",jul_complex_A},
+	                                            {"jul_B_raw",jul_raw_B},
+	                                            {"jul_B_simple",jul_simple_B},
+	                                            {"jul_B_complex",jul_complex_B}};
+	*/
+	
 	TCanvas c0;
 	for(auto&& acurve : curves){
 		c0.Clear();
@@ -114,13 +175,13 @@
 		c0.Modified();
 		c0.Update();
 		gSystem->ProcessEvents();
-		gPad->WaitPrimitive();
 		std::cout<<"curve "<<acurve.first<<" fit parameters: [";
 		for(int i=0; i<nextfunc->GetNpar(); ++i){
 			if(i>0) std::cout<<", ";
 			std::cout<<nextfunc->GetParameters()[i];
 		}
 		std::cout<<"]"<<std::endl;
+		gPad->WaitPrimitive();
 	}
 	
 	// draw all curves
@@ -159,6 +220,7 @@
 	mg.Add(feb_complex_B);
 	*/
 	
+	/*
 	mg.Add(june_raw3_A);
 	mg.Add(june_simple3_A);
 	mg.Add(june_complex3_A);
@@ -166,7 +228,25 @@
 	mg.Add(june_raw3_B);
 	mg.Add(june_simple3_B);
 	mg.Add(june_complex3_B);
+	*/
+
+	/*
+	mg.Add(jul_raw_A);
+	mg.Add(jul_simple_A);
+	mg.Add(jul_complex_A);
 	
+	mg.Add(jul2_raw_A);
+	mg.Add(jul2_simple_A);
+	mg.Add(jul2_complex_A);
+	*/
+	
+	mg.Add(jul_raw_B);
+	mg.Add(jul_simple_B);
+	mg.Add(jul_complex_B);
+	
+	mg.Add(jul2_raw_B);
+	mg.Add(jul2_simple_B);
+	mg.Add(jul2_complex_B);
 	
 	mg.Draw("ALP");
 	mg.GetYaxis()->SetRangeUser(-0.01,0.3);

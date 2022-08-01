@@ -73,6 +73,8 @@ class Plotter{
 	int LoadCalibrationData3();
 	int LoadCalibrationData4();
 	int LoadCalibrationData5();
+	int LoadCalibrationData6();
+	int LoadCalibrationData7();
 	int SetBranchAddresses();
 	int GetNextDarkEntry(std::string name, int ledon_entry_num, bool check=true);
 	TMultiGraph* MakeMultigraph(std::string name, bool relative_to_first, bool darksub, char relop='/');
@@ -125,6 +127,13 @@ int main(){
 
 int Plotter::LoadData(){
 	
+
+	std::cout<<"adding run july data to chains"<<std::endl;
+	for(auto&& c : chains){
+		c.second->Add("../GDConcMeasure/data/2022/07/*08*");
+		c_dark->Add("../GDConcMeasure/data/2022/07/*08*");
+	}
+
 	std::cout<<"adding run 66 april data to chains"<<std::endl;
 	for(auto&& c : chains){
 		c.second->Add("../GDConcMeasure/data/2022/04/66_*");
@@ -242,6 +251,34 @@ int Plotter::LoadCalibrationData5(){
 	return num_meas;
 }
 
+int Plotter::LoadCalibrationData6(){
+	
+	for(auto&& c : chains){
+		c.second->Add("../GDConcMeasure/data/2022/07/[0-9]*08July22Calib_*");
+	}
+	c_dark->Add("../GDConcMeasure/data/2022/07/[0-9]*08July22Calib_*");
+	
+	// get number of measurements
+	num_meas = c_275_A->GetEntries();
+	std::cout<<"had "<<num_meas<<" july calibration entries"<<std::endl;
+	
+	return num_meas;
+}
+
+int Plotter::LoadCalibrationData7(){
+	
+	for(auto&& c : chains){
+		c.second->Add("../GDConcMeasure/data/2022/07/[0-9]*12July22Calib_*");
+	}
+	c_dark->Add("../GDConcMeasure/data/2022/07/[0-9]*12July22Calib_*");
+	
+	// get number of measurements
+	num_meas = c_275_A->GetEntries();
+	std::cout<<"had "<<num_meas<<" july calibration entries"<<std::endl;
+	
+	return num_meas;
+}
+
 int Plotter::SetBranchAddresses(){
 	
 	std::cout<<"setting led chain branch addresses"<<std::endl;
@@ -298,7 +335,7 @@ int Plotter::SetBranchAddresses(){
 int Plotter::Execute(){
 	
 	std::cout<<"making chains"<<std::endl;
-	std::string dataset="juncal2";
+	std::string dataset="julcal2";
 	if(dataset=="febstab"){
 		// data
 		c_dark = new TChain("dark");
@@ -313,7 +350,7 @@ int Plotter::Execute(){
 		c_275_B = new TChain("275");
 		c_R_G_B = new TChain("R_G_B");
 		c_White_385 = new TChain("White_385");
-	} else if(dataset=="maycal" || dataset=="juncal" || dataset=="juncal2" || dataset=="juncal3" ){
+	} else if(dataset=="maycal" || dataset=="juncal" || dataset=="juncal2" || dataset=="juncal3" || dataset=="julcal" || dataset=="julcal2" ){
 		// calibration
 		c_dark = new TChain("Dark");
 		c_275_A = new TChain("275_A");
@@ -341,6 +378,10 @@ int Plotter::Execute(){
 		LoadCalibrationData4();
 	} else if(dataset=="juncal3"){
 		LoadCalibrationData5();
+	} else if(dataset=="julcal"){
+		LoadCalibrationData6();
+	} else if(dataset=="julcal2"){
+		LoadCalibrationData7();
 	}
 	SetBranchAddresses();
 	
@@ -534,7 +575,7 @@ int Plotter::Execute(){
 	// step 1: analyse calibration data for polynomial coffiecients,
 	// take the results printed out and populate the coefficients list
 	// in ExtractAbsorbance
-	TMultiGraph* mg_cals = FitCalibrationData("275_A", dataset);  // run for both 275_A and 275_B
+	TMultiGraph* mg_cals = FitCalibrationData("275_B", dataset);  // run for both 275_A and 275_B
 	if(mg_cals==nullptr) return 0;
 	mg_cals->Draw("AL");
 	
@@ -1289,7 +1330,7 @@ TMultiGraph* Plotter::ExtractAbsorbance(std::string name, std::string calib_ver)
 			abs_func->SetParameter("peak 2 amp",peak_heights.second/peak_heights.first);
 			TFitResultPtr frptr = g_abs->Fit(abs_func,"RQNS");
 			
-			if(frptr->IsEmpty() || !frptr->IsValid() || frptr->Status()!=0){
+			if( false /*frptr->IsEmpty() || !frptr->IsValid() || frptr->Status()!=0*/){
 				// fit failed; skip value?
 				continue;
 				peak_heights.first = 0;
@@ -1486,6 +1527,10 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string dataset){
 		bool ok = LoadConcentrations("jun06_calibration_info.txt");
 	} else if(dataset=="juncal3"){
 		bool ok = LoadConcentrations("jun08_calibration_info.txt");
+	} else if(dataset=="julcal"){
+		bool ok = LoadConcentrations("jul08_calibration_info.txt");
+	} else if(dataset=="julcal2"){
+		bool ok = LoadConcentrations("jul12_calibration_info.txt");
 	}
 	
 	purefile = std::string("../GDConcMeasure/pureDarkSubtracted_") + name + "_" + dataset + ".root";
@@ -1500,6 +1545,7 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string dataset){
 	TChain* c_dark = chains.at("dark");
 	int offset = offsets.at(name);
 	int n_entries = c_led->GetEntries();
+	n_entries = 53;
 	
 	std::string title = name+"_g";
 	TGraphErrors* calib_curve_raw = new TGraphErrors(n_entries);

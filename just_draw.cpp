@@ -38,6 +38,7 @@ class Plotter{
 	std::vector<double>* wavelengths_p = &wavelengths;
 	
 	int n_datapoints;
+	TGraphErrors* g_all = nullptr;
 	TCanvas* c1=nullptr;
 	
 	int LoadFile(std::string file, std::string trace);
@@ -71,7 +72,12 @@ int main(int argc, const char** argv){
 	myplotter.MakePlot();
 	c1->Modified();
 	c1->Update();
+
+	TCanvas* c_all = new TCanvas("c_all","c_all",1024,800);
+	c_all->cd();
+	myplotter.g_all->Draw("ALP");
 	
+	c1->cd();
 	while(gROOT->FindObject("c1")){
 		gSystem->ProcessEvents();
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -182,6 +188,7 @@ TMultiGraph* Plotter::MakePlot(int entryi){
 		std::cout<<"]"<<std::endl;
 		
 		// make TGraphErrors from data
+		g_all = new TGraphErrors(n_datapoints, wavelengths.data(), values.data(), wavelength_errors.data(), errors.data());
 		TGraph* g_inband = new TGraph(inband_values.size(), inband_wls.data(), inband_values.data());
 		TGraph* g_sideband = new TGraph(sideband_values.size(), sideband_wls.data(), sideband_values.data());
 		TGraph* g_other = new TGraph(other_values.size(), other_wls.data(), other_values.data());
