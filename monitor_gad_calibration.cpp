@@ -27,6 +27,7 @@
 #include <numeric>
 #include <chrono>
 #include <thread>
+#include <future>
 #include <cassert>
 #include <sys/stat.h>  // dirname and basename
 #include <sys/types.h> // for stat() test to see if file or folder
@@ -70,9 +71,10 @@ class Plotter{
 	
 	std::string purerefset;
 	bool CheckPath(std::string path, std::string& type);
-	bool MakePure(std::string name, bool overwrite);
+	TGraphErrors* MakePure(std::string name, bool overwrite);
 	bool LoadConcentrations(std::string filename);
-	TF1* PureScaledPlusExtras();
+	std::vector<double> GetCalibCurve(std::string led, std::string fitmethod);
+	TF1* PureScaledPlusExtras(int led_num);
 	TMultiGraph* ExtractAbsorbance(std::string name, std::string calib_version="old", bool convert=true);
 	std::pair<double,double> CalculateError(TF1* abs_func, double peak1_pos, double peak2_pos);
 	int FitTwoGaussians(TGraph* abs_graph, std::pair<double,double>& simple_peaks, std::pair<double,double>& simple_errs, std::pair<double,double>& simple_posns, bool plot=false, std::string pngname="");
@@ -86,9 +88,10 @@ class Plotter{
 	
 	int Initialise(std::string concentrationsfile);
 	TMultiGraph* Execute();
+	std::map<std::string,int> dark_sub_pures_byname; // map led name to index in dark_sub_pures
 };
 std::string purefile; // muse be global
-TGraphErrors* dark_subtracted_pure=nullptr;  // must be deleted when swtiching LEDs
+std::vector<TGraphErrors*> dark_sub_pures; // global
 
 int main(){
 	
@@ -129,10 +132,11 @@ int main(){
 	
 	// keep looking for new files until user closes main canvas
 	int loopi=0;
+	bool watch=false;
 	while(c1!=nullptr){
 		std::cout<<"."<<std::flush;
 		
-		if((loopi%10000)==0){
+		if((watch && (loopi%10000)==0) || loopi==0){
 			// look for new files
 			std::cout<<"\nchecking for new data"<<std::endl;
 			myplotter.LoadNewData();
@@ -299,13 +303,14 @@ bool Plotter::LoadConcentrations(std::string filename){
 		if(line.empty()) continue;
 		if(line[0]=='#') continue;
 		std::stringstream ss(line);
-		std::string fname, conc, concerr;
+		std::string fname;
+		double conc, concerr;
 		//std::cout<<"parsing line"<<std::endl;
 		if(!(ss >> fname >> conc >> concerr)){
 			std::cerr<<"Failed to parse line "<<line<<"!"<<std::endl;
 			break;
 		}
-		calibration_data.emplace(fname, std::pair<double,double>{strtod(conc.c_str(), nullptr),strtod(concerr.c_str(), nullptr)});
+		calibration_data.emplace(fname, std::pair<double,double>{conc,concerr});
 		std::cout<<"file "<<fname<<" has concentration "<<conc<<std::endl;
 	}
 	calib_data_file.close();
@@ -417,6 +422,16 @@ TMultiGraph* Plotter::Execute(){
 	// we can do it for each of the calibration fit methods
 	TCanvas* ce = new TCanvas("ce","ce",1024,800);
 	TMultiGraph* mg_all = new TMultiGraph("mg_all","mg_all");
+	
+	/* actually, we can't parallelise these: they all use the same plotter object
+	   so will all be sharing member variables, which isn't supported. Bah.
+	// XXX note that calling a function with async requires all arguments to be given -
+	// even those with default values given in the declaration!
+	std::vector<std::future<TMultiGraph*>> promises;
+	promises.push_back(std::move(std::async(&Plotter::ExtractAbsorbance, this, "275_A","raw",true)));
+	mg_all->Add(promises.front().get());
+	*/
+	
 	mg_all->Add(ExtractAbsorbance("275_A", "raw"));
 	mg_all->Add(ExtractAbsorbance("275_A", "complex"));
 	mg_all->Add(ExtractAbsorbance("275_A", "simple"));
@@ -456,10 +471,11 @@ TMultiGraph* Plotter::Execute(){
 
 /////////////////////////////////
 double PureFuncv2(double* x, double* par){
-	if(dark_subtracted_pure==nullptr){
-		TFile *_file0 = TFile::Open(purefile.c_str());
-		dark_subtracted_pure = (TGraphErrors*)_file0->Get("Graph");
-	}
+	// ok this function needs access to the appropriate pure graph for the correct LED
+	// But to be invoked by a TF1, this function can only take an array of doubles
+	// as arguments. So the last argument, par[8], is an LED index, which is used to
+	// look up the appropriate pure reference TGraphErrors* from a global map.
+	
 	// par [0] = y-scaling
 	// par [1] = x-scaling
 	// par [2] = x-offset
@@ -468,7 +484,11 @@ double PureFuncv2(double* x, double* par){
 	// par [5] = shoulder gaussian scaling
 	// par [6] = shoulder gaussian centre, restricted to > 282nm (RH shoulder)
 	// par [7] = shoulder gaussian spread
-	double purepart = (par[0] * dark_subtracted_pure->Eval((par[1]*x[0])+par[2]));
+	// par [8] = LED index for retrieving appropriate pure
+	
+	TGraphErrors* dark_subbed_pure = (TGraphErrors*)(dark_sub_pures.at(par[8]));
+	
+	double purepart = (par[0] * dark_subbed_pure->Eval((par[1]*x[0])+par[2]));
 	double linpart = (par[4] * x[0]) + par[3];
 	double shoulderpart = par[5]*exp(-0.5*TMath::Sq((x[0]-282.-abs(par[6]))/par[7]));
 	double retval = purepart + linpart + shoulderpart;
@@ -476,18 +496,18 @@ double PureFuncv2(double* x, double* par){
 	return retval;
 }
 
-TF1* Plotter::PureScaledPlusExtras(){
+TF1* Plotter::PureScaledPlusExtras(int led_num){
 	
 	// construct functional fit. We'll scale and add a linear background.
 	// limit the pure function to a region in which we have light - no point fitting outside this region
 	static int purever=0;
 	purever++;
 	std::string name="purev2_fct"+std::to_string(purever);
-	const int wave_min = 260, wave_max = 300, numb_of_fitting_parameters = 8;
+	const int wave_min = 260, wave_max = 300, numb_of_fitting_parameters = 9;
 	TF1* pure = new TF1(name.c_str(), PureFuncv2, wave_min, wave_max, numb_of_fitting_parameters);
 	// set default parameters
 	pure->SetParameters(1.,1.,0.,0.,0.,0.,0.,10.);
-	
+	pure->FixParameter(8,led_num);
 	return pure;
 	
 }
@@ -722,17 +742,24 @@ TMultiGraph* Plotter::ExtractAbsorbance(std::string name, std::string calib_ver,
 	
 	std::cout<<"ExtractAbsorbance for "<<name<<", "<<calib_ver<<std::endl;
 	//std::cout<<"getting pure"<<std::endl;
-	// check the pure reference trace file exists, and make it if not.
-	bool ok = MakePure(name, false);
-	if(not ok){
-		return nullptr;
+	int pure_index=-1;
+	if(dark_sub_pures_byname.count(name)==0){
+		// do not currently have this pure reference trace in memory;
+		// get it from file, making the file from the first entry
+		// in the chains if it doesn't exist.
+		TGraphErrors* dark_subbed_pure = MakePure(name, false);
+		if(dark_subbed_pure==nullptr){
+			return nullptr;
+		}
+		pure_index = dark_sub_pures.size();
+		dark_sub_pures_byname.emplace(std::pair<std::string,int>{name,pure_index});
+		dark_sub_pures.push_back(dark_subbed_pure);
+	} else {
+		// already have this pure reference in memory
+		pure_index = dark_sub_pures_byname.at(name);
 	}
-	
 	// construct the pure water function based on the pure water trace.
-	// note that we must delete the pure graph each time we switch LEDs
-	if(dark_subtracted_pure) delete dark_subtracted_pure;
-	dark_subtracted_pure = nullptr;
-	TF1* pureplusextras = PureScaledPlusExtras();
+	TF1* pureplusextras = PureScaledPlusExtras(pure_index);
 	
 	std::cout<<"getting chains"<<std::endl;
 	TChain* c_led = chains.at(name);
@@ -742,7 +769,7 @@ TMultiGraph* Plotter::ExtractAbsorbance(std::string name, std::string calib_ver,
 	std::string title = name+"_g";
 	TMultiGraph* mg = new TMultiGraph(title.c_str(), title.c_str());
 	
-	// FIXME TODO
+	// FIXME TODO - error bars
 	//TGraphErrors* g_concentrations = new TGraphErrors(n_entries);
 	TGraph* g_concentrations = new TGraph(n_entries);
 	if(calib_ver=="raw"){
@@ -929,16 +956,19 @@ TMultiGraph* Plotter::ExtractAbsorbance(std::string name, std::string calib_ver,
 				if(TMath::IsNaN(peak_heights.first)||TMath::IsNaN(peak_heights.second)){
 					//continue;
 					std::cout<<"NaN peak height!"<<std::endl;
-					peak_heights.first = 0;
-					peak_heights.second = 0;
+					if(TMath::IsNaN(peak_heights.first)) peak_heights.first=0;
+					if(TMath::IsNaN(peak_heights.second)) peak_heights.second=0;
 				}
+				peak_heights.first=std::max(0.,peak_heights.first);
+				peak_heights.second=std::max(0.,peak_heights.second);
 				
 				//std::cout<<"complex peaks at: "<<peak_posns.first<<":"<<peak_posns.second
 				//         <<" are "<<peak_heights.first<<" and "<<peak_heights.first
 				//         <<" with diff "<<peak_heights.first-peak_heights.second
 				//         <<" and ratio "<<peak_heights.first/peak_heights.second<<std::endl;
 				
-				peak_errs = CalculateError(abs_func, peak_posns.first, peak_posns.second);
+				peak_errs = std::pair<double,double>{0.1,0.1}; // FIXME
+				//peak_errs = CalculateError(abs_func, peak_posns.first, peak_posns.second);
 			}
 			std::cout<<"complex peak heights: "<<peak_heights.first<<", "<<peak_heights.second<<std::endl;
 		}
@@ -949,90 +979,9 @@ TMultiGraph* Plotter::ExtractAbsorbance(std::string name, std::string calib_ver,
 			// convert into a concentration value. We need the calibration curve:
 			//std::cout<<"converting to concentration"<<std::endl;
 			TF1 calib_curve("calib", "pol6", 0, 0.25);
+			std::vector<double> calib_coefficients = GetCalibCurve(name, calib_ver);
+			calib_curve.SetParameters(calib_coefficients.data());
 			//calib_curve.SetNpx(1000);
-			if(calib_ver=="old" && (name=="275_A" || name=="275_B")){
-				// did we have calibration coefficients for 275_A vs 275_B?
-				std::vector<double> calib_coefficients{ -2.2420182e-05,
-					                                 2.4347342,
-					                                -10.671675,
-					                                 25.117418,
-					                                -15.640706,
-					                                -35.283659,
-					                                 67.871408 };
-				calib_curve.SetParameters(calib_coefficients.data());
-			} else if(calib_ver=="raw" && name=="275_A"){
-				//std::vector<double> calib_coefficients{0.00517657, 2.86027, -7.36815, -19.955, 78.0564, 491.547, -1766.58}; // jul08
-				std::vector<double> calib_coefficients{0.00141186, 2.85759, -7.43248, -18.2004, 78.8485, 472.124, -1814.29}; // jul12
-				/*std::vector<double> calib_coefficients{ 0.00396146,
-					                                2.66054,
-					                                -12.2432,
-					                                42.909,
-					                                -15.7365,
-					                                -565.628,
-					                                1362.37 };
-				*/
-				calib_curve.SetParameters(calib_coefficients.data());
-			} else if(calib_ver=="simple" && name=="275_A"){
-				//std::vector<double> calib_coefficients{0.00100964, 3.03952, -19.4798, 77.005, 27.6594, -1608.27, 4177.23}; // jul08
-				std::vector<double> calib_coefficients{0.000901656, 2.7328, -11.972, 19.2158, 70.2304, -429.644, 743.848}; // jul12
-				/*std::vector<double> calib_coefficients{ 0.00669663,
-					                                2.30659,
-					                                -6.70807,
-					                                -8.89578,
-					                                65.2506,
-					                                256.543,
-					                                -1151.12 };
-				*/
-				calib_curve.SetParameters(calib_coefficients.data());
-			} else if(calib_ver=="complex" && name=="275_A"){
-				//std::vector<double> calib_coefficients{0.00532017, 2.62183, -8.00979, -18.5983, 91.0425, 516.762, -1989.37}; // jul08
-				std::vector<double> calib_coefficients{0.00256741, 2.53608, -5.59115, -34.2931, 86.1831, 887.119, -2934}; // jul12
-				/*std::vector<double> calib_coefficients{ 0.00668535,
-					                                2.02915,
-					                                16.099,
-					                                -501.567,
-					                                4527.85,
-					                                -17774,
-					                                25663.8 };
-				*/
-				calib_curve.SetParameters(calib_coefficients.data());
-			} else if(calib_ver=="raw" && name=="275_B"){
-				//std::vector<double> calib_coefficients{0.0121442, 2.90637, -7.30414, -19.9099, 77.1875, 485.482, -1764.29}; // jul08
-				std::vector<double> calib_coefficients{0.00151493, 2.67998, -6.92564, -16.6946, 75.3407, 444.124, -1731.61}; // jul12
-				/*std::vector<double> calib_coefficients{ 0.0162978,
-					                                2.57888,
-					                                -10.2983,
-					                                26.7082,
-					                                14.5267,
-					                                -414.93,
-					                                875.207 };
-				*/
-				calib_curve.SetParameters(calib_coefficients.data());
-			} else if(calib_ver=="simple" && name=="275_B"){
-				//std::vector<double> calib_coefficients{0.00958699, 3.01173, -17.3047, 56.2216, 55.7341, -1232.64, 2979.2}; // jul08
-				std::vector<double> calib_coefficients{0.000557654, 2.58452, -12.3119, 31.4942, 55.7869, -735.182, 1678.52}; // jul12
-				/*std::vector<double> calib_coefficients{ 0.0194698,
-					                                2.28874,
-					                                -6.76499,
-					                                -9.3567,
-					                                64.0635,
-					                                261.506,
-					                                -1119.84 };
-				*/
-				calib_curve.SetParameters(calib_coefficients.data());
-			} else if(calib_ver=="complex" && name=="275_B"){
-				//std::vector<double> calib_coefficients{0.00603398, 2.88702, -9.77863, -18.9483, 116.117, 594.401, -2502.56}; // jul08
-				std::vector<double> calib_coefficients{0.00197077, 2.35596, -5.21091, -30.7562, 100.809, 708.71, -2614.03};  // jul12
-				/*std::vector<double> calib_coefficients{ 0.0204775,
-					                                1.79824,
-					                                19.8836,
-					                                -516.837,
-					                                4389.5,
-					                                -16604.5,
-					                                23385.5 };
-				*/
-				calib_curve.SetParameters(calib_coefficients.data());
-			}
 			
 			// solve for concentration (x) from absorbance (y), with 0.01 < x < 0.21
 			//std::cout<<"parameters set, getting concentration"<<std::endl;
@@ -1108,19 +1057,26 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name){
 	// fit the absorption graph and pull the peak heights and difference.
 	// only difference is this time rather than using peak height difference
 	// to look up concentration, we look up the known concentration,
-	// and add a point mapping peak height to concentration.
+	// and add a point that maps that peak height to the corresponding concentration.
 	
-	// check the pure reference trace file exists, and make it if not.
-	bool ok = MakePure(name, false);
-	if(not ok){
-		return nullptr;
+	int pure_index=-1;
+	if(dark_sub_pures_byname.count(name)==0){
+		// do not currently have this pure reference trace in memory;
+		// get it from file, making the file from the first entry
+		// in the chains if it doesn't exist.
+		TGraphErrors* dark_subbed_pure = MakePure(name, false);
+		if(dark_subbed_pure==nullptr){
+			return nullptr;
+		}
+		pure_index = dark_sub_pures.size();
+		dark_sub_pures_byname.emplace(std::pair<std::string,int>{name,pure_index});
+		dark_sub_pures.push_back(dark_subbed_pure);
+	} else {
+		// already have this pure reference in memory
+		pure_index = dark_sub_pures_byname.at(name);
 	}
-	
 	// construct the pure water function based on the pure water trace.
-	// note that we must delete the pure graph each time we switch LEDs
-	if(dark_subtracted_pure) delete dark_subtracted_pure;
-	dark_subtracted_pure = nullptr;
-	TF1* pureplusextras = PureScaledPlusExtras();
+	TF1* pureplusextras = PureScaledPlusExtras(pure_index);
 	
 	TChain* c_led = chains.at(name);
 	TChain* c_dark = chains.at("dark");
@@ -1313,7 +1269,7 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name){
 		//abs_func->SetParameter("RH shoulder amp",raw_peaks.first*0.5);
 		//abs_func->SetParameter("LH shoulder amp",raw_peaks.second*0.2);
 		TFitResultPtr frptr = g_abs->Fit(abs_func,"RQNS");
-		if(frptr->IsEmpty() || !frptr->IsValid() /*|| frptr->Status()!=0*/){
+		if( false /* frptr->IsEmpty() || !frptr->IsValid() || frptr->Status()!=0*/){
 				// fit failed; skip value?
 				std::cout<<"FIT INVALID!"<<std::endl;
 				std::cout<<"empty: "<<frptr->IsEmpty()<<", valid: "<<frptr->IsValid()<<", status: "<<frptr->Status()<<std::endl;
@@ -1402,6 +1358,7 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name){
 		calib_curve_raw->SetPoint(next_graph_point,current_conc,raw_peaks.first-raw_peaks.second);
 		calib_curve_simple->SetPoint(next_graph_point,current_conc,simple_peaks.first-simple_peaks.second);
 		calib_curve_complex->SetPoint(next_graph_point,current_conc,peak1_height-peak2_height);
+		
 		// FIXME calculate errors, error on peak 2 needs to account for error on peak 1?
 		// error on raw result needs to come from error from spectrometer
 		calib_curve_raw->SetPointError(next_graph_point,current_concerr,0.1); // XXX ??? TODO
@@ -1431,40 +1388,76 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name){
 	calib_curve_complex->Set(next_graph_point);
 	
 	// Fit the calibration curves
-	TF1* calib_func_raw = new TF1("calib_func_raw", "pol6", 0, 0.4);
+	// 1. Raw Values method
+	TF1* calib_func_raw = new TF1("calib_func_raw", "pol6", 0, lastconc);
+	// line properties have to be set before calling Fit to apply to the saved function
 	calib_func_raw->SetLineWidth(1);
 	calib_func_raw->SetLineColor(kSpring-5);
-	// these have to be done before calling fit to apply
-	// to the saved function??
 	calib_curve_raw->Fit("calib_func_raw","RQN");
+	
+	// save fit parameters in a simple text file
+	std::string rawcoeffs_filename = std::string("calib_coeffs_")+name+"_raw.txt";
+	// open file for writing, discard any existing content
+	std::ofstream rawcoeffs_file(rawcoeffs_filename, std::ofstream::out | std::ofstream::trunc);
+	if(!rawcoeffs_file.is_open()){
+		std::cerr<<"Failed to open file "<<rawcoeffs_filename
+		         <<" for writing fit parameters"<<std::endl;
+		// i guess we'll continue?
+	}
 	std::cout<<"raw fit curve pars for led "<<name<<" are {";
 	for(int i=0; i<calib_func_raw->GetNpar(); ++i){
 		if(i>0) std::cout<<", ";
 		std::cout<<calib_func_raw->GetParameter(i);
+		rawcoeffs_file << calib_func_raw->GetParameter(i) << "\n";
 	}
 	std::cout<<"}"<<std::endl;
+	rawcoeffs_file.close();
 	
-	TF1* calib_func_simple = new TF1("calib_func_simple", "pol6", 0, 0.4);
+	// 2. Simple Fit method
+	TF1* calib_func_simple = new TF1("calib_func_simple", "pol6", 0, lastconc);
 	calib_func_simple->SetLineColor(kRed);
 	calib_func_simple->SetLineWidth(1);
 	calib_curve_simple->Fit("calib_func_simple","RQN");
+	
+	std::string simplecoeffs_filename = std::string("calib_coeffs_")+name+"_simple.txt";
+	// open file for writing, discard any existing content
+	std::ofstream simplecoeffs_file(simplecoeffs_filename, std::ofstream::out | std::ofstream::trunc);
+	if(!simplecoeffs_file.is_open()){
+		std::cerr<<"Failed to open file "<<simplecoeffs_filename
+		         <<" for writing fit parameters"<<std::endl;
+		// i guess we'll continue?
+	}
 	std::cout<<"simple fit curve pars for led "<<name<<" are {";
 	for(int i=0; i<calib_func_simple->GetNpar(); ++i){
 		if(i>0) std::cout<<", ";
 		std::cout<<calib_func_simple->GetParameter(i);
+		simplecoeffs_file << calib_func_simple->GetParameter(i) << "\n";
 	}
 	std::cout<<"}"<<std::endl;
+	simplecoeffs_file.close();
 	
-	TF1* calib_func_complex = new TF1("calib_func_complex", "pol6", 0, 0.4);
+	// 3. complex fit
+	TF1* calib_func_complex = new TF1("calib_func_complex", "pol6", 0, lastconc);
 	calib_func_complex->SetLineWidth(1);
 	calib_func_complex->SetLineColor(kBlue);
 	calib_curve_complex->Fit("calib_func_complex","RQN");
+
+	std::string complexcoeffs_filename = std::string("calib_coeffs_")+name+"_complex.txt";
+	// open file for writing, discard any existing content
+	std::ofstream complexcoeffs_file(complexcoeffs_filename, std::ofstream::out | std::ofstream::trunc);
+	if(!complexcoeffs_file.is_open()){
+		std::cerr<<"Failed to open file "<<complexcoeffs_filename
+		         <<" for writing fit parameters"<<std::endl;
+		// i guess we'll continue?
+	}
 	std::cout<<"complex fit curve pars for led "<<name<<" are {";
 	for(int i=0; i<calib_func_complex->GetNpar(); ++i){
 		if(i>0) std::cout<<", ";
 		std::cout<<calib_func_complex->GetParameter(i);
+		complexcoeffs_file << calib_func_complex->GetParameter(i) << "\n";
 	}
 	std::cout<<"}"<<std::endl;
+	complexcoeffs_file.close();
 	
 	calib_curve_simple->SetLineColor(kRed);
 	calib_curve_simple->SetLineWidth(0);
@@ -1506,6 +1499,7 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name){
 	*/
 	
 /*
+	// draw simple lines of concentration and raw peak height difference vs measurement number
 	TCanvas c4("c4","c4",1024,800);
 	std::vector<double> numberline(concentrations.size());
 	std::iota(numberline.begin(), numberline.end(), 0);
@@ -1515,7 +1509,6 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name){
 	g4.Draw("ALP");
 	
 	//TCanvas c5("c5","c5",1024,800);
-	// to try to compare shapes, scale to the same max value then plot on the same canvas
 	TGraphErrors g5(concentrations.size(), numberline.data(), calib_curve_raw->GetY(), zeros.data(), calib_curve_raw->GetEY());
 	g5.SetLineColor(kRed);
 	g5.SetMarkerColor(kRed);
@@ -1565,7 +1558,7 @@ bool Plotter::CheckPath(std::string path, std::string& type){
 	return false;
 }
 
-bool Plotter::MakePure(std::string name, bool overwrite){
+TGraphErrors* Plotter::MakePure(std::string name, bool overwrite){
 	
 	purefile = std::string("../GDConcMeasure/pureDarkSubtracted_") + name + "_" + purerefset + ".root";
 	if(!overwrite){
@@ -1574,11 +1567,13 @@ bool Plotter::MakePure(std::string name, bool overwrite){
 		bool exists = CheckPath(purefile, type);
 		if(exists && type=="f"){
 			std::cout<<"Pure file "<<purefile<<" already exists, using it"<<std::endl;
-			return true;
+			TFile *_file0 = TFile::Open(purefile.c_str());
+			TGraphErrors* dark_subtracted_pure = (TGraphErrors*)_file0->Get("Graph");
+			return dark_subtracted_pure;
 		}
 		else if(exists && type!="f"){
 			std::cerr<<"Pure file "<<purefile<<" exists but is not a standard file. Please investigate"<<std::endl;
-			return false;
+			return nullptr;
 		}
 	}
 	
@@ -1591,7 +1586,7 @@ bool Plotter::MakePure(std::string name, bool overwrite){
 	int nbytes = c_led->GetEntry(0);
 	if(nbytes<=0){
 		std::cerr<<"COULDN'T LOAD ENTRY 0 FROM LED CHAIN"<<std::endl;
-		return false;
+		return nullptr;
 	}
 	
 	/*
@@ -1628,12 +1623,132 @@ bool Plotter::MakePure(std::string name, bool overwrite){
 	for(int j=0; j<n_datapoints; ++j){
 		values.at(j) -= values_dark.at(j);
 	}
+
+	// build errors
+	std::vector<double> xerrs, yerrs;
+	for(int j=0; j<n_datapoints; ++j){
+		xerrs.push_back(0.5*(wavelengths.at(1)-wavelengths.at(0)));
+		double yerr = sqrt(errors.at(j)*errors.at(j) + errors_dark.at(j)*errors_dark.at(j));
+		yerrs.push_back(yerr);
+	}
 	
 	// make a TGraph from the data
-	TGraph graph(n_datapoints, wavelengths.data(), values.data());
-	graph.SetName("Graph");
-	graph.SetTitle("Graph");
-	graph.SaveAs(purefile.c_str());
+	TGraphErrors* graph = new TGraphErrors(n_datapoints, wavelengths.data(), values.data(), xerrs.data(), yerrs.data());
+	graph->SetName("Graph");
+	graph->SetTitle("Graph");
+	graph->SaveAs(purefile.c_str());
 	
-	return true;
+	return graph;
 }
+
+std::vector<double> Plotter::GetCalibCurve(std::string led, std::string fitmethod){
+	
+	std::string filename = std::string("calib_coeffs_")+led+"_"+fitmethod+".txt";
+	std::cout<<"loading calibration parameters from file "<<filename<<std::endl;
+	std::ifstream coeffs_file(filename.c_str());
+	if(not coeffs_file.is_open()){
+		std::cerr<<"couldn't open coefficients file "<<filename<<std::endl;
+		return std::vector<double>{};
+	}
+	
+	std::vector<double> coefficients;
+	std::string line;
+	while(getline(coeffs_file, line)){
+		if(line.empty()) continue;
+		if(line[0]=='#') continue;
+		std::stringstream ss(line);
+		double next_coeff;
+		if(!(ss >> next_coeff)){
+			std::cerr<<"Failed to parse line "<<line<<"!"<<std::endl;
+			break;
+		}
+		coefficients.push_back(next_coeff);
+	}
+	coeffs_file.close();
+	return coefficients;
+	
+}
+
+/*  for posterity, for the time being, the old hard-coded calibration curves
+			if(calib_ver=="old" && (name=="275_A" || name=="275_B")){
+				std::vector<double> calib_coefficients{ -2.2420182e-05,
+					                                 2.4347342,
+					                                -10.671675,
+					                                 25.117418,
+					                                -15.640706,
+					                                -35.283659,
+					                                 67.871408 };
+			} else if(calib_ver=="raw" && name=="275_A"){
+				//std::vector<double> calib_coefficients{0.00517657, 2.86027, -7.36815, -19.955, 78.0564, 491.547, -1766.58}; // jul08
+				std::vector<double> calib_coefficients{0.00141186, 2.85759, -7.43248, -18.2004, 78.8485, 472.124, -1814.29}; // jul12
+				//std::vector<double> calib_coefficients{ 0.00396146,
+				//	                                2.66054,
+				//	                                -12.2432,
+				//	                                42.909,
+				//	                                -15.7365,
+				//	                                -565.628,
+				//	                                1362.37 };
+				
+				calib_curve.SetParameters(calib_coefficients.data());
+			} else if(calib_ver=="simple" && name=="275_A"){
+				//std::vector<double> calib_coefficients{0.00100964, 3.03952, -19.4798, 77.005, 27.6594, -1608.27, 4177.23}; // jul08
+				std::vector<double> calib_coefficients{0.000901656, 2.7328, -11.972, 19.2158, 70.2304, -429.644, 743.848}; // jul12
+				//std::vector<double> calib_coefficients{ 0.00669663,
+				//	                                2.30659,
+				//	                                -6.70807,
+				//	                                -8.89578,
+				//	                                65.2506,
+				//	                                256.543,
+				//	                                -1151.12 };
+				
+				calib_curve.SetParameters(calib_coefficients.data());
+			} else if(calib_ver=="complex" && name=="275_A"){
+				//std::vector<double> calib_coefficients{0.00532017, 2.62183, -8.00979, -18.5983, 91.0425, 516.762, -1989.37}; // jul08
+				std::vector<double> calib_coefficients{0.00256741, 2.53608, -5.59115, -34.2931, 86.1831, 887.119, -2934}; // jul12
+				//std::vector<double> calib_coefficients{ 0.00668535,
+				//	                                2.02915,
+				//	                                16.099,
+				//	                                -501.567,
+				//	                                4527.85,
+				//	                                -17774,
+				//	                                25663.8 };
+				
+				calib_curve.SetParameters(calib_coefficients.data());
+			} else if(calib_ver=="raw" && name=="275_B"){
+				//std::vector<double> calib_coefficients{0.0121442, 2.90637, -7.30414, -19.9099, 77.1875, 485.482, -1764.29}; // jul08
+				std::vector<double> calib_coefficients{0.00151493, 2.67998, -6.92564, -16.6946, 75.3407, 444.124, -1731.61}; // jul12
+				//std::vector<double> calib_coefficients{ 0.0162978,
+				//	                                2.57888,
+				//	                                -10.2983,
+				//	                                26.7082,
+				//	                                14.5267,
+				//	                                -414.93,
+				//	                                875.207 };
+				
+				calib_curve.SetParameters(calib_coefficients.data());
+			} else if(calib_ver=="simple" && name=="275_B"){
+				//std::vector<double> calib_coefficients{0.00958699, 3.01173, -17.3047, 56.2216, 55.7341, -1232.64, 2979.2}; // jul08
+				std::vector<double> calib_coefficients{0.000557654, 2.58452, -12.3119, 31.4942, 55.7869, -735.182, 1678.52}; // jul12
+				/std::vector<double> calib_coefficients{ 0.0194698,
+				//	                                2.28874,
+				//	                                -6.76499,
+				//	                                -9.3567,
+				//	                                64.0635,
+				//	                                261.506,
+				//	                                -1119.84 };
+				
+				calib_curve.SetParameters(calib_coefficients.data());
+			} else if(calib_ver=="complex" && name=="275_B"){
+				//std::vector<double> calib_coefficients{0.00603398, 2.88702, -9.77863, -18.9483, 116.117, 594.401, -2502.56}; // jul08
+				std::vector<double> calib_coefficients{0.00197077, 2.35596, -5.21091, -30.7562, 100.809, 708.71, -2614.03};  // jul12
+				//std::vector<double> calib_coefficients{ 0.0204775,
+				//	                                1.79824,
+				//	                                19.8836,
+				//	                                -516.837,
+				//	                                4389.5,
+				//	                                -16604.5,
+				//	                                23385.5 };
+				
+				calib_curve.SetParameters(calib_coefficients.data());
+			}
+*/
