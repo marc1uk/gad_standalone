@@ -75,19 +75,25 @@ class Plotter{
 	bool LoadConcentrations(std::string filename);
 	std::vector<double> GetCalibCurve(std::string led, std::string fitmethod);
 	TF1* PureScaledPlusExtras(int led_num);
-	TMultiGraph* ExtractAbsorbance(std::string name, std::string calib_version="old", bool convert=true);
 	std::pair<double,double> CalculateError(TF1* abs_func, double peak1_pos, double peak2_pos);
-	int FitTwoGaussians(TGraph* abs_graph, std::pair<double,double>& simple_peaks, std::pair<double,double>& simple_errs, std::pair<double,double>& simple_posns, bool plot=false, std::string pngname="");
+	bool DoRawFit(TGraphErrors* g_abs, std::pair<double,double>& peak_posns, std::pair<double,double>& peak_heights, std::pair<double,double>& peak_errs, std::string pngname="", bool draw=false);
+	bool DoSimpleFit(TGraph* abs_graph, std::pair<double,double>& simple_posns, std::pair<double,double>& simple_peaks, std::pair<double,double>& simple_errs, std::string pngname="", bool plot=false);
+	bool DoComplexFit(TGraphErrors* g_abs, std::pair<double,double>& peak_posns, std::pair<double,double>& peak_heights, std::pair<double,double>& peak_errs, std::pair<double,double> initial_peak_heights, std::string pngname="", bool draw=false);
+	
 	TF1* GetAbsFunc();
-	TMultiGraph* FitCalibrationData(std::string name);
+	std::map<std::string, TMultiGraph*> FitCalibrationData(std::string name, bool make_cal_curve);
 	
 	void SetTimeAxis(TH1* hist, long t0_seconds);
+	std::vector<std::string> GetListOfFiles(std::string inputdir);
+	std::string GetStdoutFromCommand(std::string cmd, int bufsize=500);
+	
+	int ok; // general purpose use
 	
 	int sample_273=0;
 	int sample_276=0;
 	
 	int Initialise(std::string concentrationsfile);
-	TMultiGraph* Execute();
+	std::map<std::string, TMultiGraph*> Execute();
 	std::map<std::string,int> dark_sub_pures_byname; // map led name to index in dark_sub_pures
 };
 std::string purefile; // muse be global
@@ -127,8 +133,8 @@ int main(){
 	myplotter.Initialise(concentrationsfile);
 	int last_num_files=0;
 	
-	// multigraph of the calibration curves so far
-	TMultiGraph* mg_cals=nullptr;
+	std::map<std::string,TMultiGraph*> plots;
+	std::map<std::string,TCanvas*> canvases;
 	
 	// keep looking for new files until user closes main canvas
 	int loopi=0;
@@ -140,24 +146,41 @@ int main(){
 			// look for new files
 			std::cout<<"\nchecking for new data"<<std::endl;
 			myplotter.LoadNewData();
+			std::cout<<"found "<<myplotter.files.size()<<" files"<<std::endl;
 			
 			// if new files found...
 			if(myplotter.files.size()!=last_num_files){
 				//std::cout<<"new data: deleting graphs"<<std::endl;
-				// delete the old calibration curves
-				if(mg_cals) delete mg_cals;
+				// delete the old plots
+				for(std::pair<const std::string, TMultiGraph*> aplot : plots){
+					std::cout<<"deleting..."<<aplot.first<<std::endl;
+					delete aplot.second;
+					std::cout<<"...deleted"<<std::endl;
+				}
 				
 				// re-create with the full dataset
 				//std::cout<<"making new graphs"<<std::endl;
-				mg_cals = myplotter.Execute();
-				//std::cout<<"drawing"<<std::endl;
-				c1->cd();
-				mg_cals->Draw("AP");
-				mg_cals->GetYaxis()->SetRangeUser(0,0.35);
-				c1->Modified();
-				c1->Update();
-				gSystem->ProcessEvents();
-				c1->SaveAs("monitoring1.root");
+				plots = myplotter.Execute();
+				
+				std::cout<<"drawing new plots"<<std::endl;
+				for(std::pair<const std::string, TMultiGraph*> aplot : plots){
+					std::string canvasname = std::string("c_")+aplot.first;
+					TCanvas* next_canv = (TCanvas*)gROOT->FindObject(canvasname.c_str());
+					if(next_canv==nullptr){
+						next_canv = new TCanvas(canvasname.c_str(),canvasname.c_str(),1024,800);
+					}
+					if(canvases.count(canvasname)!=0 && canvases.at(canvasname)!=next_canv){
+						delete canvases.at(canvasname);
+					}
+					canvases[canvasname] = next_canv;
+					next_canv->cd();
+					aplot.second->Draw("AP");
+					next_canv->Modified();
+					next_canv->Update();
+					gSystem->ProcessEvents();
+					std::string canvasfilename = canvasname+".root";
+					next_canv->SaveAs(canvasfilename.c_str());
+				}
 				
 				last_num_files = myplotter.files.size();
 			}
@@ -170,7 +193,14 @@ int main(){
 		++loopi;
 	}
 	
-	delete mg_cals;
+	for(std::pair<const std::string, TMultiGraph*> aplot : plots){
+		delete aplot.second;
+		std::string canvasname = std::string("c_")+aplot.first;
+		TCanvas* canv = (TCanvas*)gROOT->FindObject(canvasname.c_str());
+		if(canv!=nullptr){
+			delete canv;
+		}
+	}
 	
 	return 0;
 }
@@ -179,10 +209,13 @@ int Plotter::LoadNewData(){
 	
 	// scan folder for new files
 	//const char* dirname = "../GDConcMeasure/data/2022/06/rename";
-	const char* dirname = "../GDConcMeasure/data/2022/07";
-	//std::cout<<"scanning "<<dirname<<" for new files"<<std::endl;
-	TSystemDirectory dir(dirname, dirname);
-	TList* filestlist = dir.GetListOfFiles();
+	//const char* dirname = "../GDConcMeasure/data/2022/07";
+	const char* dirname = "/data/2022/07";
+	std::cout<<"scanning "<<dirname<<" for new files"<<std::endl;
+	
+	// for some reason ROOT doesn't like bind-mounted directories in containers???
+	// instead get list of files manually
+	std::vector<std::string> filestlist = GetListOfFiles(dirname);
 	
 	// Unfortunately if you call TChain::Add with the same file twice
 	// (or patterns that match the same file twice),
@@ -190,28 +223,24 @@ int Plotter::LoadNewData(){
 	// so we manually keep track of what's in the chain
 	// and re-scan the directory, adding only what's new
 	std::map<std::string,bool> newfiles;
-	if(filestlist){
+	if(filestlist.size()){
 		//std::cout<<"got a file list"<<std::endl;
-		TSystemFile* file;
-		TIter next(filestlist);
-		while( file = (TSystemFile*)next() ) {
-			TString fname = file->GetName();
+		for(auto&& fname : filestlist){
 			//std::cout<<"checking file "<<fname<<std::endl;
-			TString prefix="[N/A]";
-			//TString expectedprefix="00117_08July22Calib";
-			//TString expectedprefix="00117_12July22Calib";
-			//TString expectedprefix="00117_13JulyEGADSfirstTest";
-			TString expectedprefix="00117_14JulyEGADS_second_test";
-			if(fname.Length()>expectedprefix.Length()) prefix = fname(0,expectedprefix.Length());
+			//std::string expectedprefix="00117_08July22Calib";
+			std::string expectedprefix="00117_12July22Calib";
+			//std::string expectedprefix="00117_13JulyEGADSfirstTest";
+			//std::string expectedprefix="00117_14JulyEGADS_second_test";
+			std::string prefix="[N/A]";
+			if(fname.length()>expectedprefix.length()) prefix = fname.substr(0,expectedprefix.length());
 			bool ourfile = (prefix==expectedprefix);
 			//std::cout<<"prefix is "<<prefix<<", ourfile is "<<ourfile<<std::endl;
-			if( !file->IsDirectory() && (fname.EndsWith(".root")) && (files.count(fname.Data())==0) 
-			    && ourfile ){
-				std::string thisfname = std::string(dirname) + "/" + std::string(fname.Data());
+			if( ourfile && files.count(fname)==0){
+				std::string thisfname = std::string(dirname) + "/" + fname;
 				newfiles.emplace(thisfname,true);
 				
 				// note this file is now added
-				files.emplace(fname.Data(),1);
+				files.emplace(fname,1);
 			}
 			
 			// update num measurements
@@ -223,7 +252,7 @@ int Plotter::LoadNewData(){
 	for(auto&& afile : newfiles){
 		std::string thisfname = afile.first;
 		// add the new file
-		std::cout<<"adding "<<thisfname<<" to tchains"<<std::endl;
+		//std::cout<<"adding "<<thisfname<<" to tchains"<<std::endl;
 		for(auto&& c : chains){
 			c.second->Add(thisfname.c_str());
 			c_dark->Add(thisfname.c_str());
@@ -314,7 +343,7 @@ bool Plotter::LoadConcentrations(std::string filename){
 		std::cout<<"file "<<fname<<" has concentration "<<conc<<std::endl;
 	}
 	calib_data_file.close();
-	std::cout<<"loaded "<<calibration_data.size()<<"concentrations"<<std::endl;
+	std::cout<<"loaded "<<calibration_data.size()<<" concentrations"<<std::endl;
 	
 	return true;
 }
@@ -406,25 +435,17 @@ int Plotter::Initialise(std::string concentrationsfile){
 	return 0;
 }
 
-TMultiGraph* Plotter::Execute(){
+std::map<std::string,TMultiGraph*> Plotter::Execute(){
 	
 	// step 1: analyse calibration data for polynomial coffiecients,
-	TMultiGraph* mg_cals = new TMultiGraph("mg_cals","mg_cals");
-	// take the results printed out and populate the coefficients list in ExtractAbsorbance
-	/*
-	TMultiGraph* mg_cals_A = FitCalibrationData("275_A");
-	mg_cals->Add(mg_cals_A);
-	TMultiGraph* mg_cals_B = FitCalibrationData("275_B");
-	mg_cals->Add(mg_cals_B);
-	*/
+	std::map<std::string, TMultiGraph*> plots_A = FitCalibrationData("275_A",false);
+	std::map<std::string, TMultiGraph*> plots_B = FitCalibrationData("275_B",false);
 	
-	// step 2: analyse data to extract plots of concentration stability
-	// we can do it for each of the calibration fit methods
-	TCanvas* ce = new TCanvas("ce","ce",1024,800);
-	TMultiGraph* mg_all = new TMultiGraph("mg_all","mg_all");
+	// combine plots
+	plots_A.insert(plots_B.begin(),plots_B.end());
 	
-	/* actually, we can't parallelise these: they all use the same plotter object
-	   so will all be sharing member variables, which isn't supported. Bah.
+	/* actually, we can't parallelise these: they both use the same plotter object
+	   so will all be sharing member variables, which isn't supported. yet.
 	// XXX note that calling a function with async requires all arguments to be given -
 	// even those with default values given in the declaration!
 	std::vector<std::future<TMultiGraph*>> promises;
@@ -432,44 +453,11 @@ TMultiGraph* Plotter::Execute(){
 	mg_all->Add(promises.front().get());
 	*/
 	
-	mg_all->Add(ExtractAbsorbance("275_A", "raw"));
-	mg_all->Add(ExtractAbsorbance("275_A", "complex"));
-	mg_all->Add(ExtractAbsorbance("275_A", "simple"));
-	mg_all->Add(ExtractAbsorbance("275_B", "raw"));
-	mg_all->Add(ExtractAbsorbance("275_B", "simple"));
-	mg_all->Add(ExtractAbsorbance("275_B", "complex"));
-	/*
-	*/
-	
-	// for comparison, the true concentrations for input
-	/*
-	std::vector<double> calib_concs;
-	for(auto&& acalibmeas : calibration_data){
-		calib_concs.push_back(acalibmeas.second.first);
-	}
-	std::cout<<"we had "<<calib_concs.size()<<" calibration measurements and "
-	         <<num_meas<<" data measurements"<<std::endl;
-	std::vector<double> numberline(calib_concs.size());
-	std::iota(numberline.begin(),numberline.end(),0);
-	TGraph* calgraph = new TGraph(calib_concs.size(), numberline.data(), calib_concs.data());
-	calgraph->SetLineColor(kMagenta);
-	calgraph->SetMarkerColor(kMagenta);
-	calgraph->SetMarkerStyle(30);
-	mg_all->Add(calgraph);
-	*/
-	
-	ce->cd();
-	mg_all->Draw("ALP");
-	ce->Modified();
-	ce->Update();
-	gSystem->ProcessEvents();
-	ce->SaveAs("monitoring.root");
-	
-	
-	return mg_cals;
+	return plots_A;
 }
 
 /////////////////////////////////
+
 double PureFuncv2(double* x, double* par){
 	// ok this function needs access to the appropriate pure graph for the correct LED
 	// But to be invoked by a TF1, this function can only take an array of doubles
@@ -667,80 +655,35 @@ std::pair<double,double> Plotter::CalculateError(TF1* abs_func, double peak1_pos
 	// but then take square to add the errors on the two peak amplitudes in quadrature
 	//std::cout<<"total error at peak 1 "<<sqrt(totalerror1)<<" and at peak 2 "<<sqrt(totalerror2)<<std::endl;
 	
+	// FIXME this is WRONG because it doesn't account for correlation between the components
+	// ALSO when fixing it: for compatibility with other formulas, we should return two values
+	// that add in quadrature to give the total error on the difference. :/ (or generalise the calling code).
+	
 	return std::pair<double,double>{sqrt(totalerror1),sqrt(totalerror2)};
 }
 
-int Plotter::FitTwoGaussians(TGraph* abs_graph, std::pair<double,double>& simple_peaks, std::pair<double,double>& simple_errs, std::pair<double,double>& peak_posns, bool plot, std::string pngname){
-	// given the absorption graph, fit the two main peaks at 273 and 275nm
-	// with gaussians, but only over a narrow region around the peak centre,
-	// where a gaussian approximation is reasonable
-	TF1 gaus1("gaus1","gaus",272.5,273.5);   // very narrow.... too narrow?
-	TF1 gaus2("gaus2","gaus",275.2,276.2);   // very narrow.... too narrow?
+std::map<std::string, TMultiGraph*> Plotter::FitCalibrationData(std::string name, bool make_cal_curve){
 	
-	double peakval = *std::max_element(abs_graph->GetY(),abs_graph->GetY()+abs_graph->GetN());
+	// loop over the data, do dark subtraction,
+	// fit the dark-subtracted data, extract the absorption graph,
+	// fit the absorption graph and pull the peak heights and difference.
 	
-	// defaults and limits
-	//gaus1.SetParameter(0,0.5);
-	gaus1.SetParameter(0,peakval);
-	gaus1.SetParameter(1,273);
-	gaus1.SetParameter(2,0.6);
-	gaus1.SetParLimits(0,0.,1.);
-	gaus1.SetParLimits(1,272.75,273.25);
-	gaus1.SetParLimits(2,0.3,1.);
+	// depending on whether we are performing a calibration or making a stability plot,
+	// either use the peak height difference to look up concentration,
+	// or look up the concentration and add a point to the calibration curve
 	
-	//gaus2.SetParameter(0,0.3);
-	gaus2.SetParameter(0,peakval*0.1);
-	gaus2.SetParameter(1,275.65);
-	gaus2.SetParameter(2,0.55);
-	gaus2.SetParLimits(0,0.,1.);
-	gaus2.SetParLimits(1,275.3,276.0);
-	gaus2.SetParLimits(2,0.3,1.);
+	// keep vectors of the key parameters for making plots
+	// absorption peak height diffs
+	std::vector<double> raw_peakdiffs, raw_peakdiff_errs;
+	std::vector<double> simple_peakdiffs, simple_peakdiff_errs;
+	std::vector<double> complex_peakdiffs, complex_peakdiff_errs;
+	// true concentrations if making a calibration curve
+	std::vector<double> true_concentrations, true_concentration_errs;
+	// calculated concentrations if using pre-existing calibration curve
+	std::vector<double> raw_concentrations, raw_concentration_errs;
+	std::vector<double> simple_concentrations, simple_concentration_errs;
+	std::vector<double> complex_concentrations, complex_concentration_errs;
 	
-	// fit the two gaussians
-	TFitResultPtr gfptr1 = abs_graph->Fit("gaus1","NRQS");
-	TFitResultPtr gfptr2 = abs_graph->Fit("gaus2","NRQS");
-	
-	double gausamp1 = gaus1.GetParameter(0);
-	double gausamp2 = gaus2.GetParameter(0);
-	
-	double gaus1amperr = gaus1.GetParError(0);
-	double gaus2amperr = gaus2.GetParError(0);
-	//std::cout<<"simple peak fit gaus 1 has ampltiude "<<gausamp1<<"+-"<<gaus1amperr<<std::endl;
-	//std::cout<<"simple peak fit gaus 2 has ampltiude "<<gausamp2<<"+-"<<gaus2amperr<<std::endl;
-	
-	double gaus1pos = gaus1.GetParameter(1);
-	double gaus2pos = gaus2.GetParameter(1);
-	
-	simple_peaks = std::pair<double,double>{gausamp1,gausamp2};
-	simple_errs = std::pair<double,double>{gaus1amperr,gaus2amperr};
-	peak_posns = std::pair<double,double>{gaus1pos,gaus2pos};
-	
-	int ok = 1;
-	if(gfptr1->IsEmpty() || !gfptr1->IsValid() /*|| gfptr1->Status()!=0*/){
-		std::cerr<<"gaus1 fit failed"<<std::endl;
-		ok = 0;
-	}
-	if(gfptr2->IsEmpty() || !gfptr2->IsValid() /*|| gfptr2->Status()!=0*/){
-		std::cerr<<"gaus2 fit failed"<<std::endl;
-		ok = 0;
-	}
-	
-	if(plot){
-		gROOT->SetBatch(true);
-		TCanvas* c_temp=(TCanvas*)gROOT->FindObject("c_temp");
-		c_temp->cd();
-		abs_graph->Draw("AP");
-		gaus1.Draw("same");
-		gaus2.Draw("same");
-		c_temp->SaveAs(pngname.c_str());
-		gROOT->SetBatch(false);
-	}
-	return ok;
-}
-
-TMultiGraph* Plotter::ExtractAbsorbance(std::string name, std::string calib_ver, bool convert){
-	
-	std::cout<<"ExtractAbsorbance for "<<name<<", "<<calib_ver<<std::endl;
 	//std::cout<<"getting pure"<<std::endl;
 	int pure_index=-1;
 	if(dark_sub_pures_byname.count(name)==0){
@@ -749,7 +692,7 @@ TMultiGraph* Plotter::ExtractAbsorbance(std::string name, std::string calib_ver,
 		// in the chains if it doesn't exist.
 		TGraphErrors* dark_subbed_pure = MakePure(name, false);
 		if(dark_subbed_pure==nullptr){
-			return nullptr;
+			return std::map<std::string,TMultiGraph*>{};
 		}
 		pure_index = dark_sub_pures.size();
 		dark_sub_pures_byname.emplace(std::pair<std::string,int>{name,pure_index});
@@ -761,357 +704,48 @@ TMultiGraph* Plotter::ExtractAbsorbance(std::string name, std::string calib_ver,
 	// construct the pure water function based on the pure water trace.
 	TF1* pureplusextras = PureScaledPlusExtras(pure_index);
 	
-	std::cout<<"getting chains"<<std::endl;
+	//std::cout<<"getting chains"<<std::endl;
 	TChain* c_led = chains.at(name);
 	TChain* c_dark = chains.at("dark");
-	int n_entries = c_led->GetEntries();
+	int n_entries = 53;// c_led->GetEntries();
 	
-	std::string title = name+"_g";
-	TMultiGraph* mg = new TMultiGraph(title.c_str(), title.c_str());
+	std::string title = std::string("g_") + name;
 	
-	// FIXME TODO - error bars
-	//TGraphErrors* g_concentrations = new TGraphErrors(n_entries);
-	TGraph* g_concentrations = new TGraph(n_entries);
-	if(calib_ver=="raw"){
-		g_concentrations->SetMarkerColor(kSpring-5);
-		g_concentrations->SetLineColor(kSpring-5);
-	} else if(calib_ver=="simple"){
-		g_concentrations->SetMarkerColor(kRed);
-		g_concentrations->SetLineColor(kRed);
-	} else if(calib_ver=="complex"){
-		g_concentrations->SetMarkerColor(kBlue);
-		g_concentrations->SetLineColor(kBlue);
+	// functions that map peak height diff to concentration
+	// we will either need these as we go (for making concentration stability plots)
+	// or we'll make them by fitting the data at the end.
+	TF1* calib_func_raw = new TF1("calib_func_raw", "pol6", 0, 0.25);
+	// line properties have to be set before calling Fit to apply to the saved function
+	calib_func_raw->SetLineWidth(1);
+	calib_func_raw->SetLineColor(kSpring-5);
+	TF1* calib_func_simple = new TF1("calib_func_simple", "pol6", 0, 0.25);
+	calib_func_simple->SetLineColor(kRed);
+	calib_func_simple->SetLineWidth(1);
+	TF1* calib_func_complex = new TF1("calib_func_complex", "pol6", 0, 0.25);
+	calib_func_complex->SetLineWidth(1);
+	calib_func_complex->SetLineColor(kBlue);
+	
+	if(!make_cal_curve){
+		// If we're making a stability plot of concentration look up
+		// the calibration curve parameters based on a past calibration
+		std::vector<double> calib_coefficients_raw = GetCalibCurve(name, "raw");
+		calib_func_raw->SetParameters(calib_coefficients_raw.data());
+		std::vector<double> calib_coefficients_simple = GetCalibCurve(name, "simple");
+		calib_func_simple->SetParameters(calib_coefficients_simple.data());
+		std::vector<double> calib_coefficients_complex = GetCalibCurve(name, "complex");
+		calib_func_complex->SetParameters(calib_coefficients_complex.data());
 	}
-	if(name=="275_A"){
-		g_concentrations->SetMarkerStyle(20);
-	} else if(name=="275_B"){
-		g_concentrations->SetMarkerStyle(34);
-	}
 	
-	int n_concentration_vals=-1;
+	// a temporary canvas for showing the fits as we go.
 	TCanvas* c_temp = new TCanvas("c_temp","c_temp",1280,800);
-	std::cout<<"concentrations loop"<<std::endl;
-	for(int i=0; i<n_entries; i++){
-		
-		std::cout<<i<<"\n";
-		
-		// get LED on trace
-		int nbytes = c_led->GetEntry(i);
-		if(nbytes<=0){
-			std::cerr<<"COULDN'T LOAD ENTRY "<<i<<" FROM LED CHAIN"<<std::endl;
-			exit(-1);
-		}
-		
-		// get nearest dark trace
-		int dark_entry = GetNextDarkEntry(name, i, false);
-		c_dark->GetEntry(dark_entry);
-		
-		// subtract dark
-		for(int j=0; j<n_datapoints; ++j){
-			values.at(j) -= values_dark.at(j);
-		}
-		
-		// split into in- and -out of absorbance bands
-		std::vector<double> inband_values;
-		std::vector<double> inband_wls;
-		std::vector<double> inband_errors;
-		std::vector<double> sideband_values;
-		std::vector<double> sideband_wls;
-		std::vector<double> other_values;
-		std::vector<double> other_wls;
-		sample_273=0;
-		sample_276=0;
-		for(int j=0; j<n_datapoints; ++j){
-			if(wavelengths.at(j)>270 && wavelengths.at(j)<280){
-				// in band
-				inband_values.push_back(values.at(j));
-				inband_wls.push_back(wavelengths.at(j));
-				inband_errors.push_back(errors.at(j));
-			} else if(wavelengths.at(j)>260 && wavelengths.at(j)<300){
-				// side band (lobes)
-				sideband_values.push_back(values.at(j));
-				sideband_wls.push_back(wavelengths.at(j));
-			} else {
-				other_values.push_back(values.at(j));
-				other_wls.push_back(wavelengths.at(j));
-			}
-			
-			// make a note of the index of the 273 and 276 peaks
-			// within the raw in-band absorption graph arrays
-			if(wavelengths.at(j)>272.8 && sample_273==0){
-				sample_273 = inband_values.size()-1;
-			} else if(wavelengths.at(j)>275.3 && sample_276==0){
-				sample_276 = inband_values.size()-1;
-			}
-		}
-		
-		// make TGraphErrors from data
-		TGraph* g_inband = new TGraph(inband_values.size(), inband_wls.data(), inband_values.data());
-		TGraph* g_sideband = new TGraph(sideband_values.size(), sideband_wls.data(), sideband_values.data());
-		TGraph* g_other = new TGraph(other_values.size(), other_wls.data(), other_values.data());
-		
-		std::string thistitle = title+"_"+std::to_string(i);
-		std::string intitle = thistitle+"_in";
-		std::string sidetitle = thistitle+"_side";
-		std::string othertitle = thistitle+"_other";
-		g_inband->SetTitle(thistitle.c_str());
-		g_inband->SetName(thistitle.c_str());
-		g_sideband->SetTitle(sidetitle.c_str());
-		g_sideband->SetName(sidetitle.c_str());
-		g_other->SetTitle(othertitle.c_str());
-		g_other->SetName(othertitle.c_str());
-		
-		// fit with pure scaled
-		//std::cout<<"fitting pure"<<std::endl;
-		g_sideband->Fit(pureplusextras,"RNQ");
-		
-		// calculate absorbance from ratio of fit to data in absorption region
-		TGraphErrors* g_abs = new TGraphErrors(inband_values.size());
-		std::string restitle = "g_abs_"+std::to_string(i);
-		for(int k=0; k<inband_values.size(); ++k){
-			double wlval, dataval;
-			g_inband->GetPoint(k, wlval, dataval);
-			double fitval = pureplusextras->Eval(wlval);
-			g_abs->SetPoint(k, wlval, log10(fitval/dataval));
-			
-			double error_on_data = inband_errors.at(k);
-			double error_on_fitval = inband_errors.at(k);
-			double err_on_ratio = sqrt(TMath::Sq(error_on_data/dataval)
-			                          +TMath::Sq(error_on_fitval/fitval));
-			double err_on_ratio_over_ratio = err_on_ratio / (fitval/dataval);
-			g_abs->SetPointError(k, wavelength_errors.at(0)/2., err_on_ratio_over_ratio*(1./log(10.)));
-		}
-		
-		// extract the peak heights and errors
-		std::pair<double,double> peak_posns;
-		std::pair<double,double> peak_heights;
-		std::pair<double,double> peak_errs;
-		
-		// raw peaks: just the graph value at the peak wavelengths
-		//std::cout<<"fitting absorbance raw"<<std::endl;
-		if(calib_ver=="raw" || calib_ver=="complex"){
-			peak_posns.first = wavelengths.at(sample_273);
-			peak_posns.second = wavelengths.at(sample_276);
-			double wlval;
-			g_abs->GetPoint(sample_273, wlval, peak_heights.first);
-			g_abs->GetPoint(sample_276, wlval, peak_heights.second);
-			
-			// if peaks are negative, coerce to 0
-			peak_heights.first=std::max(0.,peak_heights.first);
-			peak_heights.second=std::max(0.,peak_heights.second);
-			std::cout<<"raw peaks: "<<peak_heights.first<<", "<<peak_heights.second<<std::endl;
-
-			if(calib_ver=="raw"){
-				gROOT->SetBatch(true);
-				c_temp->cd();
-				g_abs->Draw("AP");
-				std::string rawname = "images/raw_"+name+"_"+std::to_string(i)+".png";
-				c_temp->SaveAs(rawname.c_str());
-				gROOT->SetBatch(false);
-			}
-			
-			peak_errs = std::pair<double,double>{0.1,0.1}; // FIXME
-		}
-		
-		// simple peaks: fit the peaks with gaussians
-		//std::cout<<"fitting absorbance simple"<<std::endl;
-		if(calib_ver=="simple"){
-			std::string simplename = "images/simple_"+name+"_"+std::to_string(i)+".png";
-			int ok = FitTwoGaussians(g_abs, peak_heights, peak_errs, peak_posns, true, simplename);
-			std::cout<<"simple peaks: "<<peak_heights.first<<", "<<peak_heights.second<<std::endl;
-		}
-		
-		// complex peaks: fit entire region with a combination of 4 gaussians
-		TF1* abs_func=nullptr;
-		//std::cout<<"fitting absorbance complex"<<std::endl;
-		if(calib_ver=="complex"){
-			
-			abs_func = GetAbsFunc();  // we own the returned TF1
-			abs_func->SetParameter("peak 1 amp",peak_heights.first);
-			abs_func->SetParameter("peak 2 amp",peak_heights.second/peak_heights.first);
-			TFitResultPtr frptr = g_abs->Fit(abs_func,"RQNS");
-			
-			gROOT->SetBatch(true);
-			c_temp->cd();
-			g_abs->Draw("AL");
-			abs_func->Draw("same");
-			std::string complexname = "images/complex_"+name+"_"+std::to_string(i)+".png";
-			c_temp->SaveAs(complexname.c_str());
-			gROOT->SetBatch(false);
-			
-			if( false /*frptr->IsEmpty() || !frptr->IsValid() || frptr->Status()!=0*/){
-				// fit failed; skip value?
-				std::cout<<"FIT INVALID!"<<std::endl;
-				std::cout<<"empty: "<<frptr->IsEmpty()<<", valid: "<<frptr->IsValid()<<", status: "<<frptr->Status()<<std::endl;
-				frptr->Print();
-				//continue;
-				//peak_heights.first = 0;
-				//peak_heights.second = 0;
-			} else {
-				// get the height of the peaks as the maximum of the curve around the peak location
-				peak_posns.first = abs_func->GetMaximumX(272.5,273.5);
-				peak_posns.second = abs_func->GetMaximumX(275.,276.);
-				peak_heights.first  = abs_func->Eval(peak_posns.first);
-				peak_heights.second  = abs_func->Eval(peak_posns.second);
-				if(TMath::IsNaN(peak_heights.first)||TMath::IsNaN(peak_heights.second)){
-					//continue;
-					std::cout<<"NaN peak height!"<<std::endl;
-					if(TMath::IsNaN(peak_heights.first)) peak_heights.first=0;
-					if(TMath::IsNaN(peak_heights.second)) peak_heights.second=0;
-				}
-				peak_heights.first=std::max(0.,peak_heights.first);
-				peak_heights.second=std::max(0.,peak_heights.second);
-				
-				//std::cout<<"complex peaks at: "<<peak_posns.first<<":"<<peak_posns.second
-				//         <<" are "<<peak_heights.first<<" and "<<peak_heights.first
-				//         <<" with diff "<<peak_heights.first-peak_heights.second
-				//         <<" and ratio "<<peak_heights.first/peak_heights.second<<std::endl;
-				
-				peak_errs = std::pair<double,double>{0.1,0.1}; // FIXME
-				//peak_errs = CalculateError(abs_func, peak_posns.first, peak_posns.second);
-			}
-			std::cout<<"complex peak heights: "<<peak_heights.first<<", "<<peak_heights.second<<std::endl;
-		}
-		++n_concentration_vals;
-		
-		// check if we're asking for concentration or just difference in peak heights
-		if(convert){
-			// convert into a concentration value. We need the calibration curve:
-			//std::cout<<"converting to concentration"<<std::endl;
-			TF1 calib_curve("calib", "pol6", 0, 0.25);
-			std::vector<double> calib_coefficients = GetCalibCurve(name, calib_ver);
-			calib_curve.SetParameters(calib_coefficients.data());
-			//calib_curve.SetNpx(1000);
-			
-			// solve for concentration (x) from absorbance (y), with 0.01 < x < 0.21
-			//std::cout<<"parameters set, getting concentration"<<std::endl;
-			double conc = calib_curve.GetX(peak_heights.first - peak_heights.second, 0.001, 0.22);
-			g_concentrations->SetPoint(n_concentration_vals,n_concentration_vals,conc);
-			std::cout<<"conc for peak diff "<<(peak_heights.first - peak_heights.second)<<" = "<<conc<<std::endl;
-			// error on concentration is error on height times gradient at that point FIXME TODO
-	//		double conc_err = peakheightdifferr * calib_curve.Derivative(peak_heights.first - peak_heights.second);
-	//		g_concentrations->SetPointError(i,wavelength_errors.at(i),conc_err);
-		} else {
-			g_concentrations->SetPoint(n_concentration_vals,n_concentration_vals,peak_heights.first-peak_heights.second);
-		}
-		
-		/*
-		TCanvas cnew("cnew","cnew",1024,800);
-		std::string mgtitle = "mgg_"+std::to_string(i);
-		TMultiGraph* mgg = new TMultiGraph(mgtitle.c_str(),mgtitle.c_str());
-		mgg->Add(g_abs);
-		mgg->Draw("ALP");
-		abs_func->Draw("same");
-		// these have to go *after* a draw or the graph has no axes
-		mgg->GetYaxis()->SetRangeUser(-0.1,0.6);
-		mgg->GetXaxis()->SetRangeUser(240,320);
-		cnew.Modified();
-		cnew.Update();
-		gSystem->ProcessEvents();
-		
-		std::cout<<"waiting for user to close canvas"<<std::endl;
-		while(gROOT->FindObject("cnew")!=nullptr){
-			gSystem->ProcessEvents();
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
-		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
-		*/
-		
-		delete g_abs;       // use this or above
-		
-		//delete mgg;
-		delete g_inband;
-		delete g_sideband;
-		delete g_other;
-		delete abs_func;
-	}
-	delete c_temp;
-	//std::cout<<"setting num points in cal curve"<<std::endl;
-	g_concentrations->Set(n_concentration_vals);
 	
-	/*
-	TCanvas cc("cc","cc",1024,800);
-	g_concentrations->Draw("ALP");
-	cc.Modified();
-	cc.Update();
-	
-	gSystem->ProcessEvents();
-	while(gROOT->FindObject("cc")!=nullptr){
-		gSystem->ProcessEvents();
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
-	}
-	*/
-	
-	//std::cout<<"returning multigraph"<<std::endl;
-	mg->Add(g_concentrations);
-	return mg;
-	
-}
-
-//####################################
-
-TMultiGraph* Plotter::FitCalibrationData(std::string name){
-	
-	// same basic procedure, loop over the data, do dark subtraction,
-	// fit the dark-subtracted data, extract the absorption graph,
-	// fit the absorption graph and pull the peak heights and difference.
-	// only difference is this time rather than using peak height difference
-	// to look up concentration, we look up the known concentration,
-	// and add a point that maps that peak height to the corresponding concentration.
-	
-	int pure_index=-1;
-	if(dark_sub_pures_byname.count(name)==0){
-		// do not currently have this pure reference trace in memory;
-		// get it from file, making the file from the first entry
-		// in the chains if it doesn't exist.
-		TGraphErrors* dark_subbed_pure = MakePure(name, false);
-		if(dark_subbed_pure==nullptr){
-			return nullptr;
-		}
-		pure_index = dark_sub_pures.size();
-		dark_sub_pures_byname.emplace(std::pair<std::string,int>{name,pure_index});
-		dark_sub_pures.push_back(dark_subbed_pure);
-	} else {
-		// already have this pure reference in memory
-		pure_index = dark_sub_pures_byname.at(name);
-	}
-	// construct the pure water function based on the pure water trace.
-	TF1* pureplusextras = PureScaledPlusExtras(pure_index);
-	
-	TChain* c_led = chains.at(name);
-	TChain* c_dark = chains.at("dark");
-	int n_entries = 53; //c_led->GetEntries();
-	
-	std::string title = name+"_g";
-	TGraphErrors* calib_curve_raw = new TGraphErrors(n_entries);
-	std::string title0 = title+"_raw";
-	calib_curve_raw->SetName(title0.c_str());
-	calib_curve_raw->SetTitle(title0.c_str());
-	TGraphErrors* calib_curve_simple = new TGraphErrors(n_entries);
-	std::string title1 = title+"_simple";
-	calib_curve_simple->SetName(title1.c_str());
-	calib_curve_simple->SetTitle(title1.c_str());
-	TGraphErrors* calib_curve_complex = new TGraphErrors(n_entries);
-	std::string title2 = title+"_complex";
-	calib_curve_complex->SetName(title2.c_str());
-	calib_curve_complex->SetTitle(title2.c_str());
-	TMultiGraph* mg_calibs = new TMultiGraph(title.c_str(), title.c_str());
-	mg_calibs->Add(calib_curve_simple);
-	mg_calibs->Add(calib_curve_complex);
-	mg_calibs->Add(calib_curve_raw);
-	
-	// as a back-check we'll also plot the concentrations vs measurement
-	// and peak height difference vs measurement indepdently
-	// (as well as the usual one against the other)
-	std::vector<double> concentrations, concentration_errs;
-	
-	TCanvas* c_temp = new TCanvas("c_temp","c_temp",1280,800);
-	int next_graph_point=0;
+	int n_measurements=0;
 	double lastconc=-99;
+	
 	//std::cout<<"looping over entries"<<std::endl;
 	for(int i=0; i<n_entries; i++){
 		
-		//std::cout<<i<<": ";
+		std::cout<<"measurement "<<i<<": ";
 		
 		// get LED on trace
 		int nbytes = c_led->GetEntry(i);
@@ -1180,17 +814,21 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name){
 		g_other->SetName(othertitle.c_str());
 		
 		// fit with pure scaled
+		std::cout<<"fitting pure"<<std::endl;
 		g_sideband->Fit(pureplusextras,"RNQ");
 		
 		// calculate absorbance from ratio of fit to data in absorption region
+		std::cout<<"generating absorption plot"<<std::endl;
 		TGraphErrors* g_abs = new TGraphErrors(inband_values.size());
 		std::string restitle = "g_abs_"+std::to_string(i);
 		for(int k=0; k<inband_values.size(); ++k){
 			double wlval, dataval;
 			g_inband->GetPoint(k, wlval, dataval);
 			double fitval = pureplusextras->Eval(wlval);
-			//std::cout<<"setting absorption point "<<k<<" to log10("<<fitval<<"/"<<dataval<<") = "<<log10(fitval/dataval)<<std::endl;
 			g_abs->SetPoint(k, wlval, log10(fitval/dataval));
+			//std::cout<<"setting absorption point "<<k<<" to log10("<<fitval<<"/"<<dataval
+			//         <<") = "<<log10(fitval/dataval)<<std::endl;
+			
 			// error on ratio is sqrt((Δa/a)²+(Δb/b)²)
 			// https://www.statisticshowto.com/error-propagation/
 			// error on logY(X) is (ΔX/X)*(1/ln(Y))
@@ -1213,316 +851,384 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name){
 			         <<", total error on ratio: "<<err_on_ratio
 			         <<", ratio of measured / transmitted: "<<(fitval/dataval)
 			         <<", ratio of error to value: "<<err_on_ratio_over_ratio
-					 <<std::endl;
+			         <<std::endl;
 			*/
 			g_abs->SetPointError(k, wavelength_errors.at(0)/2., err_on_ratio_over_ratio*(1./log(10.)));
 		}
 		
+		// Extract the height of the peaks.
 		// as the simplest estimate of peak heights, just take the graph value at the peaks.
-		std::pair<double,double> raw_peaks;
-		double wlval;
-		g_abs->GetPoint(sample_273, wlval, raw_peaks.first);
-		g_abs->GetPoint(sample_276, wlval, raw_peaks.second);
-		std::cout<<"raw peaks are: "<<raw_peaks.first<<", "<<raw_peaks.second<<std::endl;
-		gROOT->SetBatch(true);
-		c_temp->cd();
-		g_abs->Draw("AP");
+		std::pair<double,double> peak_posns_raw;
+		std::pair<double,double> peak_heights_raw;
+		std::pair<double,double> peak_errs_raw;
 		std::string rawname = "images/raw_"+name+"_"+std::to_string(i)+".png";
-		c_temp->SaveAs(rawname.c_str());
-		gROOT->SetBatch(false);
+		std::cout<<"fitting raw"<<std::endl;
+		ok = DoRawFit(g_abs, peak_posns_raw, peak_heights_raw, peak_errs_raw, rawname);
 		
-		// if peaks are negative, we could coerce to 0...
-		//raw_peaks.first=std::max(0.,raw_peaks.first);
-		//raw_peaks.second=std::max(0.,raw_peaks.second);
-		// but this tends to only happen for the first value, and results in a point at (0,0)
-		// this point then seems to be way out of the trend, so probably throws the fit off.
-		// instead, just skip this concentration
-		if(raw_peaks.first<0 || raw_peaks.second<0){
-			//std::cerr<<"skipping concentration measurement "<<i<<" as one of the peaks is negative"<<std::endl;
-			//continue;
-			raw_peaks.first=std::max(0.,raw_peaks.first);
-			raw_peaks.second=std::max(0.,raw_peaks.second);
-		}
-		
-		// just taking the data value at a specific wavelength may be a bit naff
-		// as the sampling is sparse, and we may slightly miss the absorption peak.
-		// We may do better by interpolating the peak to find a better estimate of maximum.
-		// We can do this by fitting the peaks with gaussians, but since these are peaks
-		// on a non-uniform background, we can only fit within a narrow region close to the peak.
-		std::pair<double,double> simple_peaks, simple_errs, simple_posns;
+		// A better estimate fits the peaks with gaussians to find a better estimate of maximum.
+		std::pair<double,double> peak_posns_simple;
+		std::pair<double,double> peak_heights_simple;
+		std::pair<double,double> peak_errs_simple;
 		std::string simplename = "images/simple_"+name+"_"+std::to_string(i)+".png";
-		int ok = FitTwoGaussians(g_abs, simple_peaks, simple_errs, simple_posns, true, simplename);
-		// total error from adding in quadrature
-		double simplerr = sqrt(TMath::Sq(simple_errs.first)+TMath::Sq(simple_errs.second));
-		std::cout<<"simple peaks are: "<<simple_peaks.first<<", "<<simple_peaks.second<<std::endl;
-		simple_peaks.first=std::max(0.,simple_peaks.first);
-		simple_peaks.second=std::max(0.,simple_peaks.second);
+		std::cout<<"fitting simple"<<std::endl;
+		ok = DoSimpleFit(g_abs, peak_posns_simple, peak_heights_simple, peak_errs_simple, simplename);
 		
-		// fit it with a combination of 4 gaussians
-		TF1* abs_func = GetAbsFunc();
-		// The fit has a tendency to screw up, so seed the initial values based on the raw fit.
-		// These initial values will be over-estimates, since the complex fit peak heights also
-		// have contributions from the shoulder gaussians, so peak1 component amplitude is less,
-		abs_func->SetParameter("peak 1 amp",raw_peaks.first);
-		abs_func->SetParameter("peak 2 amp",raw_peaks.second/raw_peaks.first);
-		// also set the other components relative to this - no longer needed, par definitions are already relative
-		//abs_func->SetParameter("RH shoulder amp",raw_peaks.first*0.5);
-		//abs_func->SetParameter("LH shoulder amp",raw_peaks.second*0.2);
-		TFitResultPtr frptr = g_abs->Fit(abs_func,"RQNS");
-		if( false /* frptr->IsEmpty() || !frptr->IsValid() || frptr->Status()!=0*/){
-				// fit failed; skip value?
-				std::cout<<"FIT INVALID!"<<std::endl;
-				std::cout<<"empty: "<<frptr->IsEmpty()<<", valid: "<<frptr->IsValid()<<", status: "<<frptr->Status()<<std::endl;
-				//frptr->Print();
-				//continue;
-		}
-		gROOT->SetBatch(true);
-		c_temp->cd();
-		g_abs->Draw("AL");
-		abs_func->Draw("same");
+		// as the most complex method, we fit the whole absorbance region with 4 overlapping gaussians
+		std::pair<double,double> peak_posns_complex;
+		std::pair<double,double> peak_heights_complex;
+		std::pair<double,double> peak_errs_complex;
 		std::string complexname = "images/complex_"+name+"_"+std::to_string(i)+".png";
-		c_temp->SaveAs(complexname.c_str());
-		gROOT->SetBatch(false);
+		std::cout<<"fitting complex"<<std::endl;
+		ok = DoComplexFit(g_abs, peak_posns_complex, peak_heights_complex, peak_errs_complex, peak_heights_raw, complexname);
 		
-		/*
-		TCanvas cnew("cnew","cnew",1024,800);
-		g_abs->Draw("ALP");
-		abs_func->Draw("same");
-		// these have to go *after* a draw or the graph has no axes
-		//g_abs->GetYaxis()->SetRangeUser(-0.1,0.6);
-		g_abs->GetXaxis()->SetRangeUser(240,320);
-		cnew.Modified();
-		cnew.Update();
-		gSystem->ProcessEvents();
-		std::cout<<"waiting for user to close canvas"<<std::endl;
-		while(gROOT->FindObject("cnew")!=nullptr){
-			gSystem->ProcessEvents();
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
-		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
-		*/
+		double raw_peakdiff = peak_heights_raw.first - peak_heights_raw.second;
+		double raw_peakdiff_err = sqrt(TMath::Sq(peak_errs_raw.first)+TMath::Sq(peak_errs_raw.second));
 		
-		// extract the height of the peaks by finding the maximum of the curve
-		// within a region around the peak central location. Note we CANNOT
-		// just take the gaussian amplitude because there are multiple overlapping
-		// contributions to the peak here. We could just evaluate the function at
-		// the known peak position, but this allows more flexibility.
-		double peak1_pos = abs_func->GetMaximumX(272.5,273.5);
-		double peak2_pos = abs_func->GetMaximumX(275.,276.);
-		// extract the peak heights by evaluating the function at that x
-		double peak1_height  = abs_func->Eval(peak1_pos);
-		double peak2_height  = abs_func->Eval(peak2_pos);
-		if(TMath::IsNaN(peak1_height)||TMath::IsNaN(peak2_height)){
-			std::cout<<"NaN peak height!"<<std::endl;
-			//continue;
-			if(TMath::IsNaN(peak1_height)) peak1_height=0;
-			if(TMath::IsNaN(peak2_height)) peak2_height=0;
+		double simple_peakdiff = peak_heights_simple.first - peak_heights_simple.second;
+		double simple_peakdiff_err = sqrt(TMath::Sq(peak_errs_simple.first)+TMath::Sq(peak_errs_simple.second));
+		
+		double complex_peakdiff = peak_heights_complex.first - peak_heights_complex.second;
+		double complex_peakdiff_err = sqrt(TMath::Sq(peak_errs_complex.first)+TMath::Sq(peak_errs_complex.second));
+		
+		
+		std::cout<<"raw diff: "<<peak_heights_raw.first<<" - "<<peak_heights_raw.second
+		         <<" = "<<raw_peakdiff<<std::endl;
+		std::cout<<"simple diff: "<<peak_heights_simple.first<<" - "<<peak_heights_simple.second
+		         <<" = "<<simple_peakdiff<<std::endl;
+		std::cout<<"complex diff: "<<peak_heights_complex.first<<" - "<<peak_heights_complex.second
+		         <<" = "<<complex_peakdiff<<std::endl;
+		
+		
+		// one last thing: how do we handle bad fit values (negative peak height differences?)
+		// XXX coerce or skip, that is the question....
+		raw_peakdiff=std::max(0.,raw_peakdiff);
+		simple_peakdiff=std::max(0.,simple_peakdiff);
+		complex_peakdiff=std::max(0.,complex_peakdiff);
+		++n_measurements; // in case we choose to skip.
+		
+		// add them to the vectors
+		raw_peakdiffs.push_back(raw_peakdiff);
+		simple_peakdiffs.push_back(simple_peakdiff);
+		complex_peakdiffs.push_back(complex_peakdiff);
+		
+		// add the errors FIXME for now since errors aren't correct, just use nominal values...
+		raw_peakdiff_errs.push_back(0.03);      //raw_peakdiff_err);
+		simple_peakdiff_errs.push_back(0.03);   //simple_peakdiff_err);
+		complex_peakdiff_errs.push_back(0.03);  //complex_peakdiff_err);
+		
+		// Map difference in peak height to concentration.
+		if(make_cal_curve){
+			// if we're making a calibration curve then the true concentration is known,
+			// so look it up from the reference file.
+			
+			// first get name of the file this measurement is from
+			std::string current_file = c_led->GetTree()->GetCurrentFile()->GetName();
+			//std::cout<<"filename: "<<current_file<<std::endl;
+			
+			// strip off path
+			if(current_file.find("/")!=std::string::npos){
+				current_file = current_file.substr(current_file.find_last_of("/")+1,std::string::npos);
+			}
+			
+			// sanity check that this filename is in the concentration reference map
+			if(calibration_data.count(current_file)==0){
+				std::cerr<<"Couldn't find file "<<current_file<<" in calibration data map!"<<std::endl;
+				for(auto&& am : calibration_data){
+					std::cerr<<am.first<<", ";
+				}
+				std::cerr<<std::endl;
+				return std::map<std::string,TMultiGraph*>{};
+			}
+			
+			// get the concentration and error
+			double current_conc = calibration_data.at(current_file).first;
+			std::cout<<"concentration for measurement "<<i<<" is "<<current_conc<<std::endl;
+			double current_concerr = calibration_data.at(current_file).second;
+			//if(lastconc==current_conc) break; // HACK - stop the loop once the concentration stops changing
+			// XXX double comparison; this isn't reliable and can result in breaking early.
+			lastconc=current_conc;
+			
+			// add them to the vectors
+			true_concentrations.push_back(current_conc);
+			true_concentration_errs.push_back(current_concerr);
+			
+		} else {
+			
+			// if we're making a stability plot we already have a calibration curve available
+			// so estimate the concentration based on the peak height difference
+			
+			// each fitting method has its own calibration function, which we need to
+			// solve for concentration (x) from absorbance (y), with 0.01 < x < 0.21
+			//std::cout<<"converting to concentration"<<std::endl;
+			std::cout<<"calculating raw concentration"<<std::endl;
+			double raw_conc = calib_func_raw->GetX(raw_peakdiff, 0.001, 0.22);			
+			std::cout<<"calculating simple concentration"<<std::endl;
+			double simple_conc = calib_func_simple->GetX(simple_peakdiff, 0.001, 0.22);
+			std::cout<<"calculating complex concentration"<<std::endl;
+			double complex_conc = calib_func_complex->GetX(complex_peakdiff, 0.001, 0.22);
+			raw_concentrations.push_back(raw_conc);
+			simple_concentrations.push_back(simple_conc);
+			complex_concentrations.push_back(complex_conc);
+			
+			std::cout<<"raw conc for peak diff "<<raw_peakdiff<<" = "<<raw_conc<<std::endl;
+			std::cout<<"simple conc for peak diff "<<simple_peakdiff<<" = "<<simple_conc<<std::endl;
+			std::cout<<"complex conc for peak diff "<<complex_peakdiff<<" = "<<complex_conc<<std::endl;
+			
+			// error on concentration is error on height times gradient at that point
+			double raw_conc_err = raw_peakdiff_err * calib_func_raw->Derivative(raw_peakdiff);
+			double simple_conc_err = simple_peakdiff_err * calib_func_simple->Derivative(simple_peakdiff);
+			double complex_conc_err = complex_peakdiff_err * calib_func_complex->Derivative(complex_peakdiff);
+			raw_concentration_errs.push_back(raw_conc_err);
+			simple_concentration_errs.push_back(simple_conc_err);
+			complex_concentration_errs.push_back(complex_conc_err);
 			
 		}
-		std::cout<<"complex peaks are: "<<peak1_height<<", "<<peak2_height<<std::endl;
-		peak1_height=std::max(0.,peak1_height);
-		peak2_height=std::max(0.,peak2_height);
 		
-		// calculate error on peak heights
-		std::pair<double,double> complexerrp = CalculateError(abs_func, peak1_pos, peak2_pos);
-		double complexerr = sqrt(TMath::Sq(complexerrp.first)+TMath::Sq(complexerrp.second));
-		
-		// now look up the concentration
-		// get name of the file this measuerement is from
-		std::string current_file = c_led->GetTree()->GetCurrentFile()->GetName();
-		//std::cout<<"filename: "<<current_file<<std::endl;
-		// strip off path
-		if(current_file.find("/")!=std::string::npos){
-			current_file = current_file.substr(current_file.find_last_of("/")+1,std::string::npos);
-		}
-		
-		// look up its concentration (and error)
-		if(calibration_data.count(current_file)==0){
-			std::cerr<<"Couldn't find file "<<current_file<<" in calibration data map!"<<std::endl;
-			for(auto&& am : calibration_data){
-				std::cerr<<am.first<<", ";
-			}
-			std::cerr<<std::endl;
-			return nullptr;
-		}
-		double current_conc = calibration_data.at(current_file).first;
-		std::cout<<"concentration for measurement "<<i<<" is "<<current_conc<<std::endl;
-		double current_concerr = calibration_data.at(current_file).second;
-		if(lastconc==current_conc) break; // HACK
-		lastconc=current_conc;
-		
-		concentrations.push_back(current_conc);
-		concentration_errs.push_back(current_concerr);
-		
-		// add to the calibration data curve
-		calib_curve_raw->SetPoint(next_graph_point,current_conc,raw_peaks.first-raw_peaks.second);
-		calib_curve_simple->SetPoint(next_graph_point,current_conc,simple_peaks.first-simple_peaks.second);
-		calib_curve_complex->SetPoint(next_graph_point,current_conc,peak1_height-peak2_height);
-		
-		// FIXME calculate errors, error on peak 2 needs to account for error on peak 1?
-		// error on raw result needs to come from error from spectrometer
-		calib_curve_raw->SetPointError(next_graph_point,current_concerr,0.1); // XXX ??? TODO
-		calib_curve_simple->SetPointError(next_graph_point,current_concerr, simplerr);
-		calib_curve_complex->SetPointError(next_graph_point,current_concerr, 0.1); // XXX TODO
-		++next_graph_point;
-		/*
-		std::cout<<"raw diff: "<<raw_peaks.first<<" - "<<raw_peaks.second<<" = "<<raw_peaks.first-raw_peaks.second<<std::endl;
-		std::cout<<"simple diff: "<<simple_peaks.first<<" - "<<simple_peaks.second<<" = "<<simple_peaks.first-simple_peaks.second<<std::endl;
-		std::cout<<"complex diff: "<<peak1_height<<" - "<<peak2_height<<" = "<<peak1_height-peak2_height<<std::endl;
-		std::cout<<"raw err: "<<0<<", simple err: "<<simplerr<<", complexerr: "<<complexerr<<std::endl;
-		*/
-		
-		//delete mgg;
 		delete g_inband;
 		delete g_sideband;
 		delete g_other;
 		delete g_abs;
-		delete abs_func;
 		
 	}
-	delete c_temp;
 	
-	// curtail the TGraphs in case we didn't actually set all the points due to bad fits
-	calib_curve_raw->Set(next_graph_point);
-	calib_curve_simple->Set(next_graph_point);
-	calib_curve_complex->Set(next_graph_point);
+	// general container for returned results.
+	std::map<std::string,TMultiGraph*> output_plots;
 	
-	// Fit the calibration curves
-	// 1. Raw Values method
-	TF1* calib_func_raw = new TF1("calib_func_raw", "pol6", 0, lastconc);
-	// line properties have to be set before calling Fit to apply to the saved function
-	calib_func_raw->SetLineWidth(1);
-	calib_func_raw->SetLineColor(kSpring-5);
-	calib_curve_raw->Fit("calib_func_raw","RQN");
-	
-	// save fit parameters in a simple text file
-	std::string rawcoeffs_filename = std::string("calib_coeffs_")+name+"_raw.txt";
-	// open file for writing, discard any existing content
-	std::ofstream rawcoeffs_file(rawcoeffs_filename, std::ofstream::out | std::ofstream::trunc);
-	if(!rawcoeffs_file.is_open()){
-		std::cerr<<"Failed to open file "<<rawcoeffs_filename
-		         <<" for writing fit parameters"<<std::endl;
-		// i guess we'll continue?
-	}
-	std::cout<<"raw fit curve pars for led "<<name<<" are {";
-	for(int i=0; i<calib_func_raw->GetNpar(); ++i){
-		if(i>0) std::cout<<", ";
-		std::cout<<calib_func_raw->GetParameter(i);
-		rawcoeffs_file << calib_func_raw->GetParameter(i) << "\n";
-	}
-	std::cout<<"}"<<std::endl;
-	rawcoeffs_file.close();
-	
-	// 2. Simple Fit method
-	TF1* calib_func_simple = new TF1("calib_func_simple", "pol6", 0, lastconc);
-	calib_func_simple->SetLineColor(kRed);
-	calib_func_simple->SetLineWidth(1);
-	calib_curve_simple->Fit("calib_func_simple","RQN");
-	
-	std::string simplecoeffs_filename = std::string("calib_coeffs_")+name+"_simple.txt";
-	// open file for writing, discard any existing content
-	std::ofstream simplecoeffs_file(simplecoeffs_filename, std::ofstream::out | std::ofstream::trunc);
-	if(!simplecoeffs_file.is_open()){
-		std::cerr<<"Failed to open file "<<simplecoeffs_filename
-		         <<" for writing fit parameters"<<std::endl;
-		// i guess we'll continue?
-	}
-	std::cout<<"simple fit curve pars for led "<<name<<" are {";
-	for(int i=0; i<calib_func_simple->GetNpar(); ++i){
-		if(i>0) std::cout<<", ";
-		std::cout<<calib_func_simple->GetParameter(i);
-		simplecoeffs_file << calib_func_simple->GetParameter(i) << "\n";
-	}
-	std::cout<<"}"<<std::endl;
-	simplecoeffs_file.close();
-	
-	// 3. complex fit
-	TF1* calib_func_complex = new TF1("calib_func_complex", "pol6", 0, lastconc);
-	calib_func_complex->SetLineWidth(1);
-	calib_func_complex->SetLineColor(kBlue);
-	calib_curve_complex->Fit("calib_func_complex","RQN");
-
-	std::string complexcoeffs_filename = std::string("calib_coeffs_")+name+"_complex.txt";
-	// open file for writing, discard any existing content
-	std::ofstream complexcoeffs_file(complexcoeffs_filename, std::ofstream::out | std::ofstream::trunc);
-	if(!complexcoeffs_file.is_open()){
-		std::cerr<<"Failed to open file "<<complexcoeffs_filename
-		         <<" for writing fit parameters"<<std::endl;
-		// i guess we'll continue?
-	}
-	std::cout<<"complex fit curve pars for led "<<name<<" are {";
-	for(int i=0; i<calib_func_complex->GetNpar(); ++i){
-		if(i>0) std::cout<<", ";
-		std::cout<<calib_func_complex->GetParameter(i);
-		complexcoeffs_file << calib_func_complex->GetParameter(i) << "\n";
-	}
-	std::cout<<"}"<<std::endl;
-	complexcoeffs_file.close();
-	
-	calib_curve_simple->SetLineColor(kRed);
-	calib_curve_simple->SetLineWidth(0);
-	if(name=="275_A"){
-		calib_curve_simple->SetMarkerStyle(20);
-	} else if(name=="275_B"){
-		calib_curve_simple->SetMarkerStyle(30);
-	}
-	calib_curve_simple->SetMarkerColor(kRed);
-	
-	calib_curve_complex->SetLineWidth(0);
-	calib_curve_complex->SetLineColor(kBlue);
-	if(name=="275_A"){
-		calib_curve_complex->SetMarkerStyle(20);
-	} else if(name=="275_B"){
-		calib_curve_complex->SetMarkerStyle(30);
-	}
-	calib_curve_complex->SetMarkerColor(kBlue);
-	
-	calib_curve_raw->SetLineColor(kSpring-5);
-	calib_curve_raw->SetLineWidth(0);
-	if(name=="275_A"){
-		calib_curve_raw->SetMarkerStyle(20);
-	} else if(name=="275_B"){
-		calib_curve_raw->SetMarkerStyle(30);
-	}
-	calib_curve_raw->SetMarkerColor(kSpring-5);
-
-	/*
-	TCanvas cc("cc","cc",1024,800);
-	calib_curve_simple->Draw("AP");
-	calib_func_simple->Draw("same");
-	calib_curve_complex->Draw("same P");
-	calib_func_complex->Draw("same");
-	calib_curve_raw->Draw("same P");
-	calib_func_raw->Draw("same");
-	cc.Modified();
-	cc.Update();
-	*/
-	
-/*
-	// draw simple lines of concentration and raw peak height difference vs measurement number
-	TCanvas c4("c4","c4",1024,800);
-	std::vector<double> numberline(concentrations.size());
+	// make a generic numberline for plots against measurement number
+	std::cout<<"n_measurements is "<<n_measurements<<", true cons size is "<<true_concentrations.size()<<std::endl;
+	std::vector<double> numberline(n_measurements);
 	std::iota(numberline.begin(), numberline.end(), 0);
-	std::vector<double> zeros(concentrations.size()); // errors on measurement number: 0
+	std::vector<double> zeros(n_measurements); // errors on measurement number: 0
 	std::fill(zeros.begin(), zeros.end(), 0);
-	TGraphErrors g4(concentrations.size(), numberline.data(), concentrations.data(), zeros.data(), concentration_errs.data());
-	g4.Draw("ALP");
 	
-	//TCanvas c5("c5","c5",1024,800);
-	TGraphErrors g5(concentrations.size(), numberline.data(), calib_curve_raw->GetY(), zeros.data(), calib_curve_raw->GetEY());
-	g5.SetLineColor(kRed);
-	g5.SetMarkerColor(kRed);
-	g5.Draw("LP same");
+	// plot peak height difference vs measurement
+	// generally useful whether we're doing calibration or stability monitoring
+	TGraphErrors* g_peakdiff_raw = new TGraphErrors(numberline.size(), numberline.data(), raw_peakdiffs.data(), zeros.data(), raw_peakdiff_errs.data());
+	title = "g_peakdiff_raw_"+name;
+	g_peakdiff_raw->SetName(title.c_str());
+	g_peakdiff_raw->SetTitle(title.c_str());
+	g_peakdiff_raw->SetLineColor(kSpring-5);
+	g_peakdiff_raw->SetMarkerColor(kSpring-5);
 	
+	TGraphErrors* g_peakdiff_simple = new TGraphErrors(numberline.size(), numberline.data(), simple_peakdiffs.data(), zeros.data(), simple_peakdiff_errs.data());
+	title = "g_peakdiff_simple_"+name;
+	g_peakdiff_simple->SetName(title.c_str());
+	g_peakdiff_simple->SetTitle(title.c_str());
+	g_peakdiff_simple->SetLineColor(kRed);
+	g_peakdiff_simple->SetMarkerColor(kRed);
+	
+	TGraphErrors* g_peakdiff_complex = new TGraphErrors(numberline.size(), numberline.data(), complex_peakdiffs.data(), zeros.data(), complex_peakdiff_errs.data());
+	title = "g_peakdiff_complex_"+name;
+	g_peakdiff_complex->SetName(title.c_str());
+	g_peakdiff_complex->SetTitle(title.c_str());
+	g_peakdiff_complex->SetLineColor(kBlue);
+	g_peakdiff_complex->SetMarkerColor(kBlue);
+	
+	// save results
+	title = "mg_peakdiffs_"+name;
+	TMultiGraph* mg_peakdiffs = new TMultiGraph(title.c_str(),title.c_str());
+	mg_peakdiffs->Add(g_peakdiff_raw);
+	mg_peakdiffs->Add(g_peakdiff_simple);
+	mg_peakdiffs->Add(g_peakdiff_complex);
+	output_plots.emplace(std::pair<std::string,TMultiGraph*>{title,mg_peakdiffs});
+	title = title+".root";
+	mg_peakdiffs->SaveAs(title.c_str());
+	
+	if(make_cal_curve){
+		
+		// Make the calibration curves
+		// ===========================
+		
+		// 1. Raw values method
+		TGraphErrors* calib_curve_raw = new TGraphErrors(n_measurements, true_concentrations.data(), raw_peakdiffs.data(), true_concentration_errs.data(), raw_peakdiff_errs.data());
+		
+		title+"g_calib_raw_"+name;
+		calib_curve_raw->SetName(title.c_str());
+		calib_curve_raw->SetTitle(title.c_str());
+		calib_curve_raw->SetMarkerColor(kSpring-5);
+		calib_curve_raw->SetLineColor(kSpring-5);
+		calib_curve_raw->SetLineWidth(0);
+		if(name=="275_A"){
+			calib_curve_raw->SetMarkerStyle(20);
+		} else if(name=="275_B"){
+			calib_curve_raw->SetMarkerStyle(30);
+		}
+		
+		// 2. Simple 2-gaussian method
+		TGraphErrors* calib_curve_simple = new TGraphErrors(n_measurements, true_concentrations.data(), simple_peakdiffs.data(), true_concentration_errs.data(), simple_peakdiff_errs.data());
+		title = "g_calib_simple_"+name;
+		calib_curve_simple->SetName(title.c_str());
+		calib_curve_simple->SetTitle(title.c_str());
+		calib_curve_simple->SetMarkerColor(kRed);
+		calib_curve_simple->SetLineColor(kRed);
+		calib_curve_simple->SetLineWidth(0);
+		if(name=="275_A"){
+			calib_curve_simple->SetMarkerStyle(20);
+		} else if(name=="275_B"){
+			calib_curve_simple->SetMarkerStyle(30); // 30=☆, 34=+
+		}
+		
+		// 3. complex 4-gaussian method
+		TGraphErrors* calib_curve_complex = new TGraphErrors(n_measurements, true_concentrations.data(), complex_peakdiffs.data(), true_concentration_errs.data(), complex_peakdiff_errs.data());
+		title = "g_calib_complex_"+name;
+		calib_curve_complex->SetName(title.c_str());
+		calib_curve_complex->SetTitle(title.c_str());
+		calib_curve_complex->SetMarkerColor(kBlue);
+		calib_curve_complex->SetLineColor(kBlue);
+		calib_curve_complex->SetLineWidth(0);
+		if(name=="275_A"){
+			calib_curve_complex->SetMarkerStyle(20);
+		} else if(name=="275_B"){
+			calib_curve_complex->SetMarkerStyle(30);
+		}
+		
+		// Fit the calibration curves
+		// ==========================
+		// 1. Raw Values method
+		
+		calib_curve_raw->Fit("calib_func_raw","Q","",0,lastconc); // "N"
+		
+		// save fit parameters in a simple text file
+		std::string rawcoeffs_filename = std::string("calib_coeffs_")+name+"_raw.txt";
+		// open file for writing, discard any existing content
+		std::ofstream rawcoeffs_file(rawcoeffs_filename, std::ofstream::out | std::ofstream::trunc);
+		if(!rawcoeffs_file.is_open()){
+			std::cerr<<"Failed to open file "<<rawcoeffs_filename
+				     <<" for writing fit parameters"<<std::endl;
+		}
+		std::cout<<"raw fit curve pars for led "<<name<<" are {";
+		for(int i=0; i<calib_func_raw->GetNpar(); ++i){
+			if(i>0) std::cout<<", ";
+			std::cout<<calib_func_raw->GetParameter(i);
+			if(rawcoeffs_file.is_open()) rawcoeffs_file << calib_func_raw->GetParameter(i) << "\n";
+		}
+		std::cout<<"}"<<std::endl;
+		rawcoeffs_file.close();
+		
+		// 2. Simple Fit method
+		calib_curve_simple->Fit("calib_func_simple","Q","",0,lastconc); // "N"
+		
+		std::string simplecoeffs_filename = std::string("calib_coeffs_")+name+"_simple.txt";
+		// open file for writing, discard any existing content
+		std::ofstream simplecoeffs_file(simplecoeffs_filename, std::ofstream::out | std::ofstream::trunc);
+		if(!simplecoeffs_file.is_open()){
+			std::cerr<<"Failed to open file "<<simplecoeffs_filename
+				     <<" for writing fit parameters"<<std::endl;
+		}
+		std::cout<<"simple fit curve pars for led "<<name<<" are {";
+		for(int i=0; i<calib_func_simple->GetNpar(); ++i){
+			if(i>0) std::cout<<", ";
+			std::cout<<calib_func_simple->GetParameter(i);
+			if(simplecoeffs_file.is_open()) simplecoeffs_file << calib_func_simple->GetParameter(i) << "\n";
+		}
+		std::cout<<"}"<<std::endl;
+		simplecoeffs_file.close();
+		
+		// 3. complex fit
+		calib_curve_complex->Fit("calib_func_complex","Q","",0,lastconc); // "N"
+		
+		std::string complexcoeffs_filename = std::string("calib_coeffs_")+name+"_complex.txt";
+		// open file for writing, discard any existing content
+		std::ofstream complexcoeffs_file(complexcoeffs_filename, std::ofstream::out | std::ofstream::trunc);
+		if(!complexcoeffs_file.is_open()){
+			std::cerr<<"Failed to open file "<<complexcoeffs_filename
+				     <<" for writing fit parameters"<<std::endl;
+		}
+		std::cout<<"complex fit curve pars for led "<<name<<" are {";
+		for(int i=0; i<calib_func_complex->GetNpar(); ++i){
+			if(i>0) std::cout<<", ";
+			std::cout<<calib_func_complex->GetParameter(i);
+			if(complexcoeffs_file.is_open()) complexcoeffs_file << calib_func_complex->GetParameter(i) << "\n";
+		}
+		std::cout<<"}"<<std::endl;
+		complexcoeffs_file.close();
+		
+		/*
+		TCanvas cc("cc","cc",1024,800);
+		calib_curve_simple->Draw("AP");
+		calib_func_simple->Draw("same");
+		calib_curve_complex->Draw("same P");
+		calib_func_complex->Draw("same");
+		calib_curve_raw->Draw("same P");
+		calib_func_raw->Draw("same");
+		cc.Modified();
+		cc.Update();
+		*/
+		
+		// save results
+		// ============
+		title = "mg_calibs_"+name;
+		TMultiGraph* mg_calibs = new TMultiGraph(title.c_str(), title.c_str());
+		mg_calibs->Add(calib_curve_simple);
+		mg_calibs->Add(calib_curve_complex);
+		mg_calibs->Add(calib_curve_raw);
+		output_plots.emplace(std::pair<std::string,TMultiGraph*>{title,mg_calibs});
+		title = title+".root";
+		mg_calibs->SaveAs(title.c_str());
+		
+		// make a plot of true concentration vs measurement number for reference.
+		TGraphErrors* g_true_concentrations = new TGraphErrors(numberline.size(), numberline.data(), true_concentrations.data(), zeros.data(), true_concentration_errs.data());
+		title = "g_true_concs_"+name;
+		g_true_concentrations->SetName(title.c_str());
+		g_true_concentrations->SetTitle(title.c_str());
+		title = std::string("m")+title;
+		TMultiGraph* mg_true_concs = new TMultiGraph(title.c_str(),title.c_str());
+		mg_true_concs->Add(g_true_concentrations);
+		output_plots.emplace(std::pair<std::string,TMultiGraph*>{title,mg_true_concs});
+		title = title+".root";
+		mg_true_concs->SaveAs(title.c_str());
+		
+	} else {
+		
+		// make stability with derived concentration if not doing calibration
+		TGraphErrors* g_conc_raw = new TGraphErrors(numberline.size(), numberline.data(), raw_concentrations.data(), zeros.data(), raw_concentration_errs.data());
+		title = "g_conc_raw_"+name;
+		g_conc_raw->SetName(title.c_str());
+		g_conc_raw->SetTitle(title.c_str());
+		g_conc_raw->SetLineColor(kSpring-5);
+		g_conc_raw->SetMarkerColor(kSpring-5);
+		
+		TGraphErrors* g_conc_simple = new TGraphErrors(numberline.size(), numberline.data(), simple_concentrations.data(), zeros.data(), simple_concentration_errs.data());
+		title="g_conc_simple_"+name;
+		g_conc_simple->SetName(title.c_str());
+		g_conc_simple->SetTitle(title.c_str());
+		g_conc_simple->SetLineColor(kRed);
+		g_conc_simple->SetMarkerColor(kRed);
+		
+		TGraphErrors* g_conc_complex = new TGraphErrors(numberline.size(), numberline.data(), complex_concentrations.data(), zeros.data(), complex_concentration_errs.data());
+		title="g_conc_complex_"+name;
+		g_conc_complex->SetName(title.c_str());
+		g_conc_complex->SetTitle(title.c_str());
+		g_conc_complex->SetLineColor(kBlue);
+		g_conc_complex->SetMarkerColor(kBlue);
+		
+		// save results
+		title = "mg_concs_"+name;
+		TMultiGraph* mg_concs = new TMultiGraph(title.c_str(),title.c_str());
+		mg_concs->Add(g_conc_raw);
+		mg_concs->Add(g_conc_simple);
+		mg_concs->Add(g_conc_complex);
+		output_plots.emplace(std::pair<std::string,TMultiGraph*>{title,mg_concs});
+		title=title+".root";
+		mg_concs->SaveAs(title.c_str());
+		
+	}
+	
+	/*
 	gSystem->ProcessEvents();
-	while(gROOT->FindObject("cc")!=nullptr){
+	while(gROOT->FindObject("c_temp")!=nullptr){
 		gSystem->ProcessEvents();
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	}
-*/
+	*/
+	
+	delete c_temp;
+	delete calib_func_raw;
+	delete calib_func_simple;
+	delete calib_func_complex;
 	
 	//std::cout<<"returning multigraph"<<std::endl;
-	return mg_calibs;
+	return output_plots;
 	
 }
 
@@ -1752,3 +1458,242 @@ std::vector<double> Plotter::GetCalibCurve(std::string led, std::string fitmetho
 				calib_curve.SetParameters(calib_coefficients.data());
 			}
 */
+
+bool Plotter::DoRawFit(TGraphErrors* g_abs, std::pair<double,double>& peak_posns, std::pair<double,double>& peak_heights, std::pair<double,double>& peak_errs, std::string pngname, bool draw){
+	g_abs->GetPoint(sample_273, peak_posns.first, peak_heights.first);
+	g_abs->GetPoint(sample_276, peak_posns.second, peak_heights.second);
+	peak_errs.first = errors.at(sample_273);
+	peak_errs.second = errors.at(sample_276);
+	//std::cout<<"raw peaks are: "<<peak_heights.first<<", "<<peak_heights.second<<std::endl;
+	
+	bool ok = true;
+	
+	// check if extracted peak amplitudes are positive
+	if(peak_heights.first<0 || peak_heights.second<0){
+		// this tends to only happen for the first value, and results in a point at (0,0)
+		// plotting this point then tends to lie out of the trend, so may throw the fit off.
+		// instead, just skip this concentration...?
+		//std::cerr<<"skipping concentration measurement "<<i<<" as one of the peaks is negative"<<std::endl;
+		//continue;
+		// or alternatively coerce to 0
+		//peak_heights.first=std::max(0.,peak_heights.first);
+		//peak_heights.second=std::max(0.,peak_heights.second);
+		
+		ok = false;
+	}
+	
+	if(pngname!=""){
+		if(!draw) gROOT->SetBatch(true);
+		TCanvas* c_temp=(TCanvas*)gROOT->FindObject("c_temp");
+		c_temp->cd();
+		g_abs->Draw("AP");
+		c_temp->SaveAs(pngname.c_str());
+		gROOT->SetBatch(false);
+	}
+	
+	return true;
+}
+
+bool Plotter::DoSimpleFit(TGraph* abs_graph, std::pair<double,double>& peak_posns, std::pair<double,double>& peak_heights, std::pair<double,double>& peak_errs, std::string pngname, bool plot){
+	// given the absorption graph, fit the two main peaks at 273 and 275nm
+	// with gaussians, but only over a narrow region around the peak centre,
+	// where a gaussian approximation is reasonable
+	TF1 gaus1("gaus1","gaus",272.5,273.5);   // very narrow.... too narrow?
+	TF1 gaus2("gaus2","gaus",275.2,276.2);   // very narrow.... too narrow?
+	
+	double peakval = *std::max_element(abs_graph->GetY(),abs_graph->GetY()+abs_graph->GetN());
+	
+	// defaults and limits
+	//gaus1.SetParameter(0,0.5);
+	gaus1.SetParameter(0,peakval);
+	gaus1.SetParameter(1,273);
+	gaus1.SetParameter(2,0.6);
+	gaus1.SetParLimits(0,0.,1.);
+	gaus1.SetParLimits(1,272.75,273.25);
+	gaus1.SetParLimits(2,0.3,1.);
+	
+	//gaus2.SetParameter(0,0.3);
+	gaus2.SetParameter(0,peakval*0.1);
+	gaus2.SetParameter(1,275.65);
+	gaus2.SetParameter(2,0.55);
+	gaus2.SetParLimits(0,0.,1.);
+	gaus2.SetParLimits(1,275.3,276.0);
+	gaus2.SetParLimits(2,0.3,1.);
+	
+	// fit the two gaussians
+	TFitResultPtr gfptr1 = abs_graph->Fit("gaus1","NRQS");
+	TFitResultPtr gfptr2 = abs_graph->Fit("gaus2","NRQS");
+	
+	double gausamp1 = gaus1.GetParameter(0);
+	double gausamp2 = gaus2.GetParameter(0);
+	
+	double gaus1amperr = gaus1.GetParError(0);
+	double gaus2amperr = gaus2.GetParError(0);
+	//std::cout<<"simple peak fit gaus 1 has ampltiude "<<gausamp1<<"+-"<<gaus1amperr<<std::endl;
+	//std::cout<<"simple peak fit gaus 2 has ampltiude "<<gausamp2<<"+-"<<gaus2amperr<<std::endl;
+	
+	double gaus1pos = gaus1.GetParameter(1);
+	double gaus2pos = gaus2.GetParameter(1);
+	
+	peak_posns = std::pair<double,double>{gaus1pos,gaus2pos};
+	peak_heights = std::pair<double,double>{gausamp1,gausamp2};
+	peak_errs = std::pair<double,double>{gaus1amperr,gaus2amperr};
+	
+	bool ok = 1;
+	// note that these are not necessarily reliable indicators of whether the fit was ok or not
+	if(gfptr1->IsEmpty() || !gfptr1->IsValid() || gfptr1->Status()!=0){
+		std::cerr<<"gaus1 fit failed"<<std::endl;
+		ok = 0;
+	}
+	if(gfptr2->IsEmpty() || !gfptr2->IsValid() || gfptr2->Status()!=0){
+		std::cerr<<"gaus2 fit failed"<<std::endl;
+		ok = 0;
+	}
+	
+	//std::cout<<"simple peaks are: "<<peak_heights.first<<", "<<peak_heights.second<<std::endl;
+	
+	if(pngname!=""){
+		if(!plot) gROOT->SetBatch(true);
+		TCanvas* c_temp=(TCanvas*)gROOT->FindObject("c_temp");
+		c_temp->cd();
+		abs_graph->Draw("AP");
+		gaus1.Draw("same");
+		gaus2.Draw("same");
+		c_temp->SaveAs(pngname.c_str());
+		gROOT->SetBatch(false);
+	}
+	
+	return ok;
+}
+
+bool Plotter::DoComplexFit(TGraphErrors* g_abs, std::pair<double,double>& peak_posns, std::pair<double,double>& peak_heights, std::pair<double,double>& peak_errs, std::pair<double,double> initial_peak_heights, std::string pngname, bool draw){
+	
+	TF1* abs_func = GetAbsFunc();
+	// Seed the initial values based on the raw fit.
+	// The raw heights will be over-estimates, since in the complex fit the two main peaks
+	// are fit with additional shoulder gaussians, so the main component amplitude is less,
+	// but it should be close enough for a starting value.
+	// in case of a bad initial value from low concentrations, coerce to at least 0.
+	initial_peak_heights.first = std::max(0.,initial_peak_heights.first);
+	initial_peak_heights.second = std::max(0.,initial_peak_heights.second);
+	abs_func->SetParameter("peak 1 amp",initial_peak_heights.first);
+	abs_func->SetParameter("peak 2 amp",initial_peak_heights.second/initial_peak_heights.first);
+	TFitResultPtr frptr = g_abs->Fit(abs_func,"RQNS");
+	
+	bool ok = true;
+	// note these are not reliable indicators that the fit is bad...
+	if( frptr->IsEmpty() || !frptr->IsValid() || frptr->Status()!=0){
+			// fit failed; skip value?
+			std::cout<<"FIT INVALID!"<<std::endl;
+			std::cout<<"empty: "<<frptr->IsEmpty()<<", valid: "<<frptr->IsValid()
+			         <<", status: "<<frptr->Status()<<std::endl;
+			//frptr->Print();
+			//continue;
+			ok = false;
+	}
+	
+	// extract the height of the peaks by finding the maximum of the curve
+	// within a region around the peak central location. Note we CANNOT
+	// just take the gaussian amplitude because there are multiple overlapping
+	// contributions to the peak here. We could just evaluate the function at
+	// the known peak position, but this allows more flexibility.
+	peak_posns.first = abs_func->GetMaximumX(272.5,273.5);
+	peak_posns.second = abs_func->GetMaximumX(275.,276.);
+	// extract the peak heights by evaluating the function at that x
+	peak_heights.first   = abs_func->Eval(peak_posns.first);
+	peak_heights.second  = abs_func->Eval(peak_posns.second);
+	
+	// this is a pretty robust indicator that the fit is bad!
+	if(TMath::IsNaN(peak_heights.first)||TMath::IsNaN(peak_heights.second)){
+		std::cout<<"NaN peak height!"<<std::endl;
+		//continue;
+		if(TMath::IsNaN(peak_heights.first)) peak_heights.first=0;
+		if(TMath::IsNaN(peak_heights.second)) peak_heights.second=0;
+		ok = false;
+	}
+	//std::cout<<"complex peaks are: "<<peak_heights.first<<", "<<peak_heights.second<<std::endl;
+	
+	// calculate error on peak heights
+	peak_errs = CalculateError(abs_func, peak_posns.first, peak_posns.second);
+	
+	// if given an output name, save an image of the fit
+	if(pngname!=""){
+		if(!draw) gROOT->SetBatch(true);
+		TCanvas* c_temp=(TCanvas*)gROOT->FindObject("c_temp");
+		c_temp->cd();
+		g_abs->Draw("AL");
+		abs_func->Draw("same");
+		c_temp->SaveAs(pngname.c_str());
+		gROOT->SetBatch(false);
+	}
+	
+	/*
+	if(draw){
+		// draw the absorption curve and the complex fit.
+		TCanvas cnew("cnew","cnew",1024,800);
+		g_abs->Draw("ALP");
+		abs_func->Draw("same");
+		// these have to go *after* a draw or the graph has no axes
+		//g_abs->GetYaxis()->SetRangeUser(-0.1,0.6);
+		g_abs->GetXaxis()->SetRangeUser(240,320);
+		cnew.Modified();
+		cnew.Update();
+		gSystem->ProcessEvents();
+		std::cout<<"waiting for user to close canvas"<<std::endl;
+		while(gROOT->FindObject("cnew")!=nullptr){
+			gSystem->ProcessEvents();
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+	*/
+	
+	delete abs_func;
+	
+	return ok;
+	
+}
+
+std::vector<std::string> Plotter::GetListOfFiles(std::string inputdir){
+	// convert to absolute path if required
+	std::string absdir = GetStdoutFromCommand(std::string("readlink -f ")+inputdir);
+	absdir.erase(absdir.find_last_not_of(" \t\n\015\014\013")+1);  // strip trailing whitespace
+	//std::cout<<"input dir is '"<<inputdir<<"', absolute path is '"<<absdir<<"'"<<std::endl;
+	std::string lscommand = "find " + absdir + " -iname '*.root' 2>/dev/null";
+	//std::cout<<"lscommand is '"<<lscommand<<"'"<<std::endl;
+	std::string fileliststring = GetStdoutFromCommand(lscommand);
+	//std::cout<<"fileliststring is '"<<fileliststring<<"'"<<std::endl;
+	
+	std::stringstream ssl;
+	ssl << fileliststring;
+	std::string nextfilestring;
+	std::vector<std::string> paths;
+	
+	while(getline(ssl,nextfilestring)){
+		std::size_t last_char_loc = nextfilestring.find_last_of("/\\");
+		std::string fname = nextfilestring.substr(last_char_loc+1);
+		paths.push_back(fname);
+	}
+	return paths;
+}
+
+std::string Plotter::GetStdoutFromCommand(std::string cmd, int bufsize){
+	/*
+	  credit: Jeremy Morgan, source:
+	  https://www.jeremymorgan.com/tutorials/c-programming/how-to-capture-the-output-of-a-linux-command-in-c/
+	*/
+	std::string data;
+	FILE * stream;
+	char* buffer = new char[bufsize];
+	cmd.append(" 2>&1");
+	
+	stream = popen(cmd.c_str(), "r");
+	if(stream){
+		while(!feof(stream)){
+			if (fgets(buffer, bufsize, stream) != NULL) data.append(buffer);
+		}
+		pclose(stream);
+	}
+	delete[] buffer;
+	return data;
+}
