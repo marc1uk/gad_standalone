@@ -1,0 +1,32 @@
+# the pure water refererence trace, used as the LED profile in the functional fit
+# should be a TGraphErrors with the name 'Graph' in a file:
+# "../GDConcMeasure/pureDarkSubtracted_" + <led> + "_" + pure_ref_name + ".root"
+# e.g. '../GDConcMeasure/pureDarkSubtracted_275_A_julcal.root'
+# if this file does not exist, it will be made from the first entry in the TChain.
+#pure_ref_name   julcal
+pure_ref_name   julcal2
+
+# the concentrations file should be a space-delimited text file where each line
+# specifies the name of a file containing a measurement, followed by the concentration
+# for that measurement and the error on the concentration.
+# NOTE: if a concentration file is given, the program assumes you wish to produce
+# a calibration curve from the data.
+# if no concentration file is given, the program instead assumes calibration
+# parameters from a past calibration already exist, and will estimate the concentration.
+#concentrations_file   jul08_calibration_info.txt
+#concentrations_file   jul12_calibration_info.txt
+
+# directory for input files
+#input_dir ../GDConcMeasure/data/2022/06/rename
+#input_dir ../GDConcMeasure/data/2022/07
+input_dir /data/2022/07
+
+# file name prefix to identify a subset of files in that directory
+#input_prefix 00117_08July22Calib
+#input_prefix 00117_12July22Calib
+#input_prefix 00117_13JulyEGADSfirstTest
+input_prefix 00117_14JulyEGADS_second_test
+
+# to analyse a subset of entries in the resulting tchain
+first_entry 200
+max_entries 10

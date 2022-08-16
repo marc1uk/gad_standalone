@@ -35,6 +35,7 @@
 class Plotter{
 	public:
 	
+	// members
 	TChain* c_dark = nullptr;
 	TChain* c_275_A = nullptr;
 	TChain* c_275_B = nullptr;
@@ -61,17 +62,26 @@ class Plotter{
 	std::map<std::string,int> offsets;
 	int n_datapoints;
 	int num_meas;
-	int refentry=0;
 	int darksperloop=12;
-	
 	std::map<std::string, std::pair<double,double>> calibration_data;
+	std::string purerefset;
+	bool do_calibration;
+	bool generate_pure;  // MakePure will not overwrite unless told to do so
+	
+	// for finding input data, used by LoadNewData
+	std::string dirname;
+	std::string expectedprefix;
+	int first_entry=0;
+	int max_entries=-1;
+	
+	// methods
+	bool LoadConfig(std::string filename);
 	int LoadNewData();
 	int SetBranchAddresses();
 	int GetNextDarkEntry(std::string name, int ledon_entry_num, bool check=true);
 	
-	std::string purerefset;
 	bool CheckPath(std::string path, std::string& type);
-	TGraphErrors* MakePure(std::string name, bool overwrite);
+	TGraphErrors* MakePure(std::string name, bool overwrite=false);
 	bool LoadConcentrations(std::string filename);
 	std::vector<double> GetCalibCurve(std::string led, std::string fitmethod);
 	TF1* PureScaledPlusExtras(int led_num);
@@ -92,14 +102,104 @@ class Plotter{
 	int sample_273=0;
 	int sample_276=0;
 	
-	int Initialise(std::string concentrationsfile);
+	int Initialise(std::string configfile);
 	std::map<std::string, TMultiGraph*> Execute();
 	std::map<std::string,int> dark_sub_pures_byname; // map led name to index in dark_sub_pures
 };
-std::string purefile; // muse be global
 std::vector<TGraphErrors*> dark_sub_pures; // global
 
-int main(){
+bool Plotter::LoadConfig(std::string filename){
+	
+	// read config file keys into a std::map
+	std::map<std::string,std::string> configs;
+	std::cout<<"loading configuration from file "<<filename<<std::endl;
+	std::ifstream config_file(filename.c_str());
+	if(not config_file.is_open()){
+		std::cerr<<"couldn't open config file "<<filename<<std::endl;
+		return false;
+	}
+	
+	std::string line;
+	//std::cout<<"getting lines"<<std::endl;
+	while(getline(config_file, line)){
+		//std::cout<<"processing line "<<line<<std::endl;
+		if(line.empty()) continue;
+		if(line[0]=='#') continue;
+		std::stringstream ss(line);
+		std::string key, value;
+		//std::cout<<"parsing line"<<std::endl;
+		if(!(ss >> key >> value)){
+			std::cerr<<"Failed to parse line "<<line<<"!"<<std::endl;
+			break;
+		}
+		configs.emplace(std::pair<std::string,std::string>{key,value});
+	}
+	config_file.close();
+	
+	// scan the map for key variables, check everything is present
+	// and set the corresponding member variables
+	if(configs.count("concentrations_file")!=0){
+		// if specified, this implies we're generating a calibation curve
+		do_calibration=true;
+		// read in the file that specifies the concentration at each measurement
+		bool ok = LoadConcentrations(configs.at("concentrations_file"));
+		if(not ok) return false;
+		// we can use the first entry in the TChain to make a pure-water
+		// LED reference trace, if one doesn't exist already
+		generate_pure=true;
+	} else {
+		// if not specified, this implies we're making a stability plot
+		do_calibration=false;
+		// in this case we must have a pure reference file already
+		// since it is assumed that our first measurement is not pure water
+		generate_pure=false;
+	}
+	
+	// in either case we need a filename for the pure water reference (to read or create)
+	if(configs.count("pure_ref_name")==0){
+		std::cerr<<"no pure reference pure_ref_name given in config file!"<<std::endl;
+		return false;
+	} else {
+		// this string is used to form the name of the pure reference file
+		// used (or generated, if in calibration mode) by MakePure
+		purerefset = configs.at("pure_ref_name");
+	}
+	
+	// get the directory of input files
+	if(configs.count("input_dir")==0){
+		std::cerr<<"no input_dir specified!"<<std::endl;
+		return false;
+	} else {
+		dirname = configs.at("input_dir");
+	}
+	// and the file prefix to identify a subset of files in this directory
+	if(configs.count("input_prefix")==0){
+		std::cerr<<"no input_prefix specified!"<<std::endl;
+		return false;
+	} else {
+		expectedprefix=configs.at("input_prefix");
+	}
+	
+	// in case we want to analyse a subset of measurements
+	// in the resulting TChain from these files
+	if(configs.count("first_entry")!=0){
+		first_entry=stoi(configs.at("first_entry"));
+	}
+	if(configs.count("max_entries")!=0){
+		max_entries=stoi(configs.at("max_entries"));
+	}
+	
+	return true;
+}
+
+
+int main(int argc, const char* argv[]){
+	
+	if(argc==0){
+		std::cout<<"usage: "<<argv[0]<<" <configfile>"<<std::endl;
+		return 0;
+	}
+	std::string configfile = argv[1];
 	
 	TApplication myapp("rootTApp",0,0);
 	gErrorIgnoreLevel = kWarning; // decrease ROOT verbosity, it never has anything useful to say.
@@ -121,24 +221,18 @@ int main(){
 	// create plotter class
 	Plotter myplotter;
 	
-	// used to form the name of the pure reference file generated by MakePure
-	//myplotter.purerefset="julcal";
-	myplotter.purerefset="julcal2";
+	// read configs, create toolchains and set branch addresses
+	myplotter.Initialise(configfile);
 	
-	// used to read in actual concentrations of each measurement
-	//std::string concentrationsfile="jul08_calibration_info.txt";
-	std::string concentrationsfile="jul12_calibration_info.txt";
-	
-	// create toolchains and set branch addresses
-	myplotter.Initialise(concentrationsfile);
-	int last_num_files=0;
-	
+	// each execute call will return a map of various different plots
 	std::map<std::string,TMultiGraph*> plots;
+	// we'll need a canvas for each
 	std::map<std::string,TCanvas*> canvases;
 	
 	// keep looking for new files until user closes main canvas
 	int loopi=0;
-	bool watch=false;
+	int last_num_files=0;
+	bool watch=false;  // should we continually watch for new files, or just process once
 	while(c1!=nullptr){
 		std::cout<<"."<<std::flush;
 		
@@ -174,7 +268,7 @@ int main(){
 					}
 					canvases[canvasname] = next_canv;
 					next_canv->cd();
-					aplot.second->Draw("AP");
+					aplot.second->Draw("AXP");
 					next_canv->Modified();
 					next_canv->Update();
 					gSystem->ProcessEvents();
@@ -208,10 +302,7 @@ int main(){
 int Plotter::LoadNewData(){
 	
 	// scan folder for new files
-	//const char* dirname = "../GDConcMeasure/data/2022/06/rename";
-	//const char* dirname = "../GDConcMeasure/data/2022/07";
-	const char* dirname = "/data/2022/07";
-	std::cout<<"scanning "<<dirname<<" for new files"<<std::endl;
+	std::cout<<"scanning "<<dirname<<" for new files beginning with prefix "<<expectedprefix<<std::endl;
 	
 	// for some reason ROOT doesn't like bind-mounted directories in containers???
 	// instead get list of files manually
@@ -227,16 +318,12 @@ int Plotter::LoadNewData(){
 		//std::cout<<"got a file list"<<std::endl;
 		for(auto&& fname : filestlist){
 			//std::cout<<"checking file "<<fname<<std::endl;
-			//std::string expectedprefix="00117_08July22Calib";
-			std::string expectedprefix="00117_12July22Calib";
-			//std::string expectedprefix="00117_13JulyEGADSfirstTest";
-			//std::string expectedprefix="00117_14JulyEGADS_second_test";
 			std::string prefix="[N/A]";
 			if(fname.length()>expectedprefix.length()) prefix = fname.substr(0,expectedprefix.length());
 			bool ourfile = (prefix==expectedprefix);
 			//std::cout<<"prefix is "<<prefix<<", ourfile is "<<ourfile<<std::endl;
 			if( ourfile && files.count(fname)==0){
-				std::string thisfname = std::string(dirname) + "/" + fname;
+				std::string thisfname = dirname + "/" + fname;
 				newfiles.emplace(thisfname,true);
 				
 				// note this file is now added
@@ -348,8 +435,6 @@ bool Plotter::LoadConcentrations(std::string filename){
 	return true;
 }
 
-
-
 int Plotter::GetNextDarkEntry(std::string name, int ledon_entry_num, bool check){
 	
 	/*
@@ -411,7 +496,7 @@ int Plotter::GetNextDarkEntry(std::string name, int ledon_entry_num, bool check)
 	return darkentry;
 }
 
-int Plotter::Initialise(std::string concentrationsfile){
+int Plotter::Initialise(std::string configfile){
 	
 	std::cout<<"making chains"<<std::endl;
 	c_dark = new TChain("Dark");
@@ -428,21 +513,39 @@ int Plotter::Initialise(std::string concentrationsfile){
 	};
 	
 	SetBranchAddresses();
+
+	bool ok = LoadConfig(configfile);
 	
-	// load calibration info that specifies our concentrations
-	bool ok = LoadConcentrations(concentrationsfile);
-	
-	return 0;
+	return ok;
 }
 
 std::map<std::string,TMultiGraph*> Plotter::Execute(){
 	
-	// step 1: analyse calibration data for polynomial coffiecients,
-	std::map<std::string, TMultiGraph*> plots_A = FitCalibrationData("275_A",false);
-	std::map<std::string, TMultiGraph*> plots_B = FitCalibrationData("275_B",false);
+	// step 1: analyse calibration data for polynomial coffiecients
+	std::cout<<"calling FitCalibData with do_calibration: "<<do_calibration<<std::endl;
+	std::map<std::string, TMultiGraph*> plots_A = FitCalibrationData("275_A",do_calibration);
+	std::map<std::string, TMultiGraph*> plots_B = FitCalibrationData("275_B",do_calibration);
 	
 	// combine plots
-	plots_A.insert(plots_B.begin(),plots_B.end());
+	//plots_A.insert(plots_B.begin(),plots_B.end());
+	for(std::pair<const std::string, TMultiGraph*>& aplot : plots_A){
+		std::string plotname = aplot.first;
+		// edit the LED name to make the corresponding key in the plots_B map
+		plotname.back()='B';
+		std::cout<<"stripped plotname is "<<plotname<<std::endl;
+		TMultiGraph* as_plots = aplot.second;
+		int num_plots = as_plots->GetListOfGraphs()->GetEntries();
+		TMultiGraph* bs_plots = plots_B.at(plotname);
+		as_plots->Add(bs_plots);
+		for(int i=0; i<num_plots; ++i){
+			TGraphErrors* g = (TGraphErrors*)as_plots->GetListOfGraphs()->At(i);
+			g->SetMarkerStyle(2);
+		}
+		for(int i=num_plots; i<(2*num_plots); ++i){
+			TGraphErrors* g = (TGraphErrors*)as_plots->GetListOfGraphs()->At(i);
+			g->SetMarkerStyle(5);
+		}
+	}
 	
 	/* actually, we can't parallelise these: they both use the same plotter object
 	   so will all be sharing member variables, which isn't supported. yet.
@@ -690,7 +793,7 @@ std::map<std::string, TMultiGraph*> Plotter::FitCalibrationData(std::string name
 		// do not currently have this pure reference trace in memory;
 		// get it from file, making the file from the first entry
 		// in the chains if it doesn't exist.
-		TGraphErrors* dark_subbed_pure = MakePure(name, false);
+		TGraphErrors* dark_subbed_pure = MakePure(name);
 		if(dark_subbed_pure==nullptr){
 			return std::map<std::string,TMultiGraph*>{};
 		}
@@ -703,11 +806,13 @@ std::map<std::string, TMultiGraph*> Plotter::FitCalibrationData(std::string name
 	}
 	// construct the pure water function based on the pure water trace.
 	TF1* pureplusextras = PureScaledPlusExtras(pure_index);
+	pureplusextras->SetLineColor(kBlack);
+	pureplusextras->SetLineWidth(1);
 	
 	//std::cout<<"getting chains"<<std::endl;
 	TChain* c_led = chains.at(name);
 	TChain* c_dark = chains.at("dark");
-	int n_entries = 53;// c_led->GetEntries();
+	int n_entries = c_led->GetEntries(); //53
 	
 	std::string title = std::string("g_") + name;
 	
@@ -742,8 +847,9 @@ std::map<std::string, TMultiGraph*> Plotter::FitCalibrationData(std::string name
 	int n_measurements=0;
 	double lastconc=-99;
 	
-	//std::cout<<"looping over entries"<<std::endl;
-	for(int i=0; i<n_entries; i++){
+	if(max_entries>0) n_entries = std::min(n_entries,first_entry+max_entries);
+	std::cout<<"looping over entries "<<first_entry<<" - "<<n_entries<<std::endl;
+	for(int i=first_entry; i<n_entries; i++){
 		
 		std::cout<<"measurement "<<i<<": ";
 		
@@ -812,10 +918,26 @@ std::map<std::string, TMultiGraph*> Plotter::FitCalibrationData(std::string name
 		g_sideband->SetName(sidetitle.c_str());
 		g_other->SetTitle(othertitle.c_str());
 		g_other->SetName(othertitle.c_str());
+		g_inband->SetMarkerColor(kRed);
+		g_inband->SetMarkerStyle(2);
+		g_sideband->SetMarkerColor(kBlue);
+		g_sideband->SetMarkerStyle(5);
 		
 		// fit with pure scaled
 		std::cout<<"fitting pure"<<std::endl;
 		g_sideband->Fit(pureplusextras,"RNQ");
+		// save an image to check the fit
+		std::string purename = "images/purefit_"+name+"_"+std::to_string(i)+".png";
+		/*if(!draw)*/ gROOT->SetBatch(true);
+		c_temp->cd();
+		g_sideband->Draw("AP");
+		g_sideband->GetYaxis()->SetRangeUser(0,1.1*(*std::max_element(g_inband->GetY(),g_inband->GetY()+g_inband->GetN())));
+		g_inband->Draw("same P");
+		pureplusextras->Draw("same");
+		
+		c_temp->SaveAs(purename.c_str());
+		gROOT->SetBatch(false);
+
 		
 		// calculate absorbance from ratio of fit to data in absorption region
 		std::cout<<"generating absorption plot"<<std::endl;
@@ -995,7 +1117,7 @@ std::map<std::string, TMultiGraph*> Plotter::FitCalibrationData(std::string name
 	std::map<std::string,TMultiGraph*> output_plots;
 	
 	// make a generic numberline for plots against measurement number
-	std::cout<<"n_measurements is "<<n_measurements<<", true cons size is "<<true_concentrations.size()<<std::endl;
+	std::cout<<"n_measurements is "<<n_measurements<<", true concs size is "<<true_concentrations.size()<<std::endl;
 	std::vector<double> numberline(n_measurements);
 	std::iota(numberline.begin(), numberline.end(), 0);
 	std::vector<double> zeros(n_measurements); // errors on measurement number: 0
@@ -1266,19 +1388,22 @@ bool Plotter::CheckPath(std::string path, std::string& type){
 
 TGraphErrors* Plotter::MakePure(std::string name, bool overwrite){
 	
-	purefile = std::string("../GDConcMeasure/pureDarkSubtracted_") + name + "_" + purerefset + ".root";
+	std::string purefile = std::string("../GDConcMeasure/pureDarkSubtracted_") + name + "_" + purerefset + ".root";
 	if(!overwrite){
 		// check if the pure reference file already exists
 		std::string type="";
 		bool exists = CheckPath(purefile, type);
 		if(exists && type=="f"){
 			std::cout<<"Pure file "<<purefile<<" already exists, using it"<<std::endl;
-			TFile *_file0 = TFile::Open(purefile.c_str());
+			TFile* _file0 = TFile::Open(purefile.c_str());
 			TGraphErrors* dark_subtracted_pure = (TGraphErrors*)_file0->Get("Graph");
 			return dark_subtracted_pure;
 		}
 		else if(exists && type!="f"){
 			std::cerr<<"Pure file "<<purefile<<" exists but is not a standard file. Please investigate"<<std::endl;
+			return nullptr;
+		} else if(!exists && !generate_pure){
+			std::cerr<<"Pure file "<<purefile<<" does not exist"<<std::endl;
 			return nullptr;
 		}
 	}
