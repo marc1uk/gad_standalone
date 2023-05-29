@@ -54,7 +54,6 @@ class Plotter{
 	std::vector<double>* values_dark_p = &values_dark;
 	std::vector<double>* errors_dark_p = &errors_dark;
 	std::vector<double>* wavelengths_p = &wavelengths;
-
 	
 	std::map<std::string, TChain*> chains;
 	std::map<std::string,int> offsets;
