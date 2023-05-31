@@ -82,7 +82,6 @@ class Plotter{
 	int SetBranchAddresses();
 	int GetNextDarkEntry(std::string name, int ledon_entry_num, bool check=true);
 	
-	std::string purerefset;
 	bool CheckPath(std::string path, std::string& type);
 	TGraphErrors* MakePure(std::string name, bool overwrite=false);
 	bool LoadConcentrations(std::string filename);
@@ -91,7 +90,7 @@ class Plotter{
 	std::pair<double,double> CalculateError(TF1* abs_func, double peak1_pos, double peak2_pos);
 	bool DoRawFit(TGraphErrors* g_abs, std::pair<double,double>& peak_posns, std::pair<double,double>& peak_heights, std::pair<double,double>& peak_errs, std::string pngname="", bool draw=false);
 	bool DoSimpleFit(TGraph* abs_graph, std::pair<double,double>& simple_posns, std::pair<double,double>& simple_peaks, std::pair<double,double>& simple_errs, std::string pngname="", bool plot=false);
-	bool DoComplexFit(TGraphErrors* g_abs, std::pair<double,double>& peak_posns, std::pair<double,double>& peak_heights, std::pair<double,double>& peak_errs, std::pair<double,double> initial_peak_heights, std::string pngname="", bool draw=false);
+	bool DoComplexFit(TGraphErrors* g_abs, std::pair<double,double>& peak_posns, std::pair<double,double>& peak_heights, std::pair<double,double>& peak_errs, std::pair<double,double> initial_peak_heights, std::string pngname="", bool draw=false, std::vector<double>* fitpars=nullptr);
 	
 	TF1* GetAbsFunc();
 	std::map<std::string, TMultiGraph*> FitCalibrationData(std::string name, bool make_cal_curve);
@@ -638,7 +637,7 @@ double PureFuncv2(double* x, double* par){
 	return retval;
 }
 
-TF1* Plotter::PureScaledPlusExtras(){
+TF1* Plotter::PureScaledPlusExtras(int led_num){
 	
 	// construct functional fit. We'll scale and add a linear background.
 	// limit the pure function to a region in which we have light - no point fitting outside this region
@@ -1057,10 +1056,7 @@ std::map<std::string, TMultiGraph*> Plotter::FitCalibrationData(std::string name
 		std::pair<double,double> peak_errs_complex;
 		std::string complexname = "images/complex_"+name+"_"+std::to_string(i)+".png";
 		std::cout<<"fitting complex"<<std::endl;
-		ok = DoComplexFit(g_abs, peak_posns_complex, peak_heights_complex, peak_errs_complex, peak_heights_raw, complexname);
-		
-		// save complex fit parameters
-		*complexfitparsp = std::vector<double>(abs_func->GetParameters(), abs_func->GetParameters()+abs_func->GetNpar());
+		ok = DoComplexFit(g_abs, peak_posns_complex, peak_heights_complex, peak_errs_complex, peak_heights_raw, complexname, complexfitparsp);
 		
 		// add pure and complex fit par entries to output tree
 		paramtrees.at(name)->Fill();
@@ -1768,7 +1764,7 @@ bool Plotter::DoSimpleFit(TGraph* abs_graph, std::pair<double,double>& peak_posn
 	return ok;
 }
 
-bool Plotter::DoComplexFit(TGraphErrors* g_abs, std::pair<double,double>& peak_posns, std::pair<double,double>& peak_heights, std::pair<double,double>& peak_errs, std::pair<double,double> initial_peak_heights, std::string pngname, bool draw){
+bool Plotter::DoComplexFit(TGraphErrors* g_abs, std::pair<double,double>& peak_posns, std::pair<double,double>& peak_heights, std::pair<double,double>& peak_errs, std::pair<double,double> initial_peak_heights, std::string pngname, bool draw, std::vector<double>* fitpars){
 	
 	TF1* abs_func = GetAbsFunc();
 	// Seed the initial values based on the raw fit.
@@ -1850,6 +1846,9 @@ bool Plotter::DoComplexFit(TGraphErrors* g_abs, std::pair<double,double>& peak_p
 	}
 	*/
 	
+	if(fitpars!=nullptr){
+		*fitpars = std::vector<double>(abs_func->GetParameters(), abs_func->GetParameters()+abs_func->GetNpar());
+	}
 	delete abs_func;
 	
 	return ok;

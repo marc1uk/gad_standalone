@@ -64,6 +64,7 @@ class Plotter{
 	
 	// initialisation
 	int LoadData(std::string filepattern);
+	std::string GetStdoutFromCommand(std::string cmd, int bufsize=500);
 	int SetBranchAddresses();
 	bool LoadConcentrations(std::string filename);
 	bool MakePure(std::string name, bool overwrite);
@@ -71,8 +72,8 @@ class Plotter{
 	
 	// main processing functions
 	int Execute(std::string concs_file, std::string datafiles, std::string datasetname);
-	TMultiGraph* FitStabilityData(std::string name, std::string dataset);
-	TMultiGraph* FitCalibrationData(std::string name, std::string calib_info_file, std::string purefile);
+	TMultiGraph* FitStabilityData(std::string name, std::string dataset, std::string calib_info_file="");
+	TMultiGraph* FitCalibrationData(std::string name, std::string purefile, std::string calib_info_file);
 	
 	// Fitting functions
 	std::pair<double,double> CalculateError(TF1* abs_func, double peak1_pos, double peak2_pos);
@@ -81,7 +82,7 @@ class Plotter{
 	TF1* GetFourGausFit();
 	
 	// misc
-	bool GetMetrics(std::string ledname, int entrynum, TF1* pureplusextras, std::map<std::string,std::pair<double,double>> metric_and_err);
+	bool GetMetrics(std::string ledname, int entrynum, TF1* pureplusextras, std::map<std::string,std::pair<double,double>>& metric_and_err);
 	int GetNextDarkEntry(std::string name, int ledon_entry_num);
 	
 	int sample_273=0;
@@ -102,24 +103,18 @@ int main(){
 	TApplication myapp("rootTApp",0,0);
 	
 	// the known concentrations for each measurement
-	std::string concs_file = "may_calib_info.txt";
+	std::string concs_file = "april_2023_calib/apr_2023_calibration_info.txt";
 	// pattern of data files to analyse
-	std::string datafiles = "../GDConcMeasure/data/2022/07/[0-9]*12July22Calib_*";
+	//std::string datafiles = "april_2023_calib/*.root";
+	std::string datafiles = "../GDConcMeasure/data/2023/06/00185_25_Apr_2023_EGADS_Run_031*";
 	// 'datasetname' is unique part of the generated pure reference file name
 	// the generated pure reference file is named according to:
 	// purefile = "../GDConcMeasure/pureDarkSubtracted_"+ ledname + "_" + dataset + ".root";
 	// since it depends on the ledname, we can't pass the generated filename in directly
-	std::string datasetname="febcal";
+	std::string datasetname="apr2023cal";
 	
 	Plotter myplotter;
 	myplotter.Execute(concs_file, datafiles, datasetname);
-	
-	TCanvas* c1 = (TCanvas*)gROOT->FindObject("c1");
-	while(c1!=nullptr){
-		gSystem->ProcessEvents();
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
-		c1 = (TCanvas*)gROOT->FindObject("c1");
-	}
 	
 	return 0;
 }
@@ -140,52 +135,86 @@ int Plotter::Execute(std::string concs_file, std::string datafiles, std::string 
 		{"White_385", c_White_385}
 	};
 	
+	std::cout<<"loading data"<<std::endl;
 	LoadData(datafiles);
+	std::cout<<"setting branch addresses"<<std::endl;
 	SetBranchAddresses();
 	
 	gStyle->SetPalette(kBird);
 	n_colours = TColor::GetNumberOfColors();
+	TCanvas* c1 = nullptr;
 	
-	// do not change the name of this canvas, closing it will terminate the program.
-	TCanvas* c1 = new TCanvas("c1","c1",1024,800);
-	
-	std::vector<double> numberline(num_meas);
-	std::iota(numberline.begin(),numberline.end(),0);
+	// ============================================================================
 	
 	// step 1: analyse calibration data for polynomial coffiecients
 	// ------------------------------------------------------------
-	TMultiGraph* mg_cals = FitCalibrationData("275_B", concs_file, datasetname);  // run for both 275_A and 275_B
-	if(mg_cals==nullptr) return 0;
-	mg_cals->Draw("AL");
-	
 	/*
+	std::cout<<"calling FitCalibrationData"<<std::endl;
+	TMultiGraph* mg_calib = new TMultiGraph("mg_data","mg_data");
+	mg_calib->Add(FitCalibrationData("275_A", datasetname, concs_file));
+	mg_calib->Add(FitCalibrationData("275_B", datasetname, concs_file));
+	
+	// display output for user
+	if(gROOT->FindObject("c1")==nullptr) c1 = new TCanvas("c1","c1",1024,800);
+	c1->cd();
+	mg_calib->Draw("AP");
+	*/
+	
 	// step 2: analyse data to extract plots of concentration stability
 	// ----------------------------------------------------------------
 	// we can do it for each of the calibration fit methods
 	TMultiGraph* mg_data = new TMultiGraph("mg_data","mg_data");
-	mg_data->Add(FitStabilityData("275_A", datasetname));
-	mg_data->Add(FitStabilityData("275_B", datasetname));
+	mg_data->Add(FitStabilityData("275_A", datasetname/*, concs_file*/));  // concs_file optional
+	mg_data->Add(FitStabilityData("275_B", datasetname/*, concs_file*/));  // for validation
 	
-	
+	///*
 	// for comparison, plot true concentrations vs extracted concentrations
-	// in theory this should be more or less a straight line along y=x,
-	// with some fluctuation from fitting the calibration datapoints with a pol6
+	// (note: don't do this if passing concs_file to FitStabilityData)
 	bool ok = LoadConcentrations(concs_file);
 	std::vector<double> calib_concs;
 	for(auto&& acalibmeas : calibration_data){
 		calib_concs.push_back(acalibmeas.second.first);
 	}
-	std::cout<<"we had "<<calib_concs.size()<<" calibration measurements and "
-	         <<num_meas<<" data measurements"<<std::endl;
-	TGraph* calgraph = new TGraph(calib_concs.size(), numberline.data(), calib_concs.data());
-	calgraph->SetLineColor(kMagenta);
-	calgraph->SetMarkerColor(kMagenta);
-	calgraph->SetMarkerStyle(30);
-	mg_data->Add(calgraph);
+	std::sort(calib_concs.begin(),calib_concs.end());
+	std::vector<double> numberline(calib_concs.size());
+	std::iota(numberline.begin(),numberline.end(),0);
+	TGraph* g_cal = new TGraph(calib_concs.size(), numberline.data(), calib_concs.data());
+	g_cal->SetTitle("true conc");
+	g_cal->SetLineColor(kMagenta);
+	g_cal->SetMarkerColor(kMagenta);
+	g_cal->SetMarkerStyle(30);
+	mg_data->Add(g_cal);
+	//*/
 	
+	/*
+	// if doing a validation plot of measured conc vs true conc, add a line of y=x
+	bool ok = LoadConcentrations(concs_file);
+	std::vector<double> calib_concs;
+	for(auto&& acalibmeas : calibration_data){
+		calib_concs.push_back(acalibmeas.second.first);
+	}
+	std::sort(calib_concs.begin(),calib_concs.end());
+	std::vector<double> numberline(calibration_data.size());
+	std::iota(numberline.begin(),numberline.end(),0);
+	for(auto& elem : numberline) elem *= calib_concs.back()/numberline.size();
+	TGraph* g_diag = new TGraph(numberline.size(), numberline.data(), numberline.data());
+	g_diag->SetLineColor(kBlack);
+	g_diag->SetMarkerStyle(0);
+	g_diag->SetLineStyle(9);
+	mg_data->Add(g_diag);
+	*/
+	
+	// display output for user
+	if(gROOT->FindObject("c1")==nullptr) c1 = new TCanvas("c1","c1",1024,800);
 	c1->cd();
 	mg_data->Draw("ALP");
-	*/
+	
+	// ============================================================================
+	
+	while(gROOT->FindObject("c1")!=nullptr){
+		gSystem->ProcessEvents();
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
 	
 	
 	return 0;
@@ -196,14 +225,16 @@ int Plotter::Execute(std::string concs_file, std::string datafiles, std::string 
 // Main Function Part 1 - Extracting the Calibration Curve
 // -------------------------------------------------------
 
-TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_file, std::string dataset){
+TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string dataset, std::string concs_file){
 	
 	// loop over the data, do dark subtraction, fit the dark-subtracted data, extract the absorption graph.
 	// Fit the absorption graph and pull peak heights and difference.
 	// Finally, look up the known concentration and add a point mapping peak height diff to concentration.
 	
 	// load calibration info that specifies our concentrations
+	std::cout<<"loading true concentrations"<<std::endl;
 	bool ok = LoadConcentrations(concs_file);
+	if(!ok) return nullptr;
 	
 	// build the name of the pure file based on the led name and an arbitrary dataset name.
 	// MakePure will make it if required, or do nothing if it already exists.
@@ -216,11 +247,12 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_fil
 		return nullptr;
 	}
 	
+	std::cout<<"getting reference pure"<<std::endl;
 	TF1* pureplusextras = PureScaledPlusExtras();
 	
 	TChain* c_led = chains.at(name);
 	int n_entries = c_led->GetEntries();
-	n_entries = 53;
+	//n_entries = 53;
 	
 	std::string title = name+"_g";
 	TGraphErrors* calib_curve_raw = new TGraphErrors(n_entries);
@@ -235,10 +267,6 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_fil
 	std::string title2 = title+"_complex";
 	calib_curve_complex->SetName(title2.c_str());
 	calib_curve_complex->SetTitle(title2.c_str());
-	TMultiGraph* mg_calibs = new TMultiGraph(title.c_str(), title.c_str());
-	mg_calibs->Add(calib_curve_simple);
-	mg_calibs->Add(calib_curve_complex);
-	mg_calibs->Add(calib_curve_raw);
 	
 	// as a back-check we'll also plot the concentrations vs measurement
 	// and peak height difference vs measurement indepdently
@@ -247,12 +275,15 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_fil
 	
 	int next_graph_point=0;
 	double lastconc=-99;
+	std::cout<<"looping over calibration entries"<<std::endl;
 	for(int i=0; i<n_entries; i++){
 		
 		std::cout<<i<<": ";
 		
 		std::map<std::string, std::pair<double,double>> metric_and_err;
 		ok = GetMetrics(name, i, pureplusextras, metric_and_err);
+		//std::cout<<"GetMetrics returned "<<ok<<std::endl;
+		// XXX should we 'continue' if false?
 		
 		// look up the concentration of this measurement.
 		// first get name of the file this measuerement is from
@@ -273,6 +304,7 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_fil
 			break;
 			return nullptr;
 		}
+		//std::cout<<"getting concentration"<<std::endl;
 		double current_conc = calibration_data.at(current_file).first;
 		double current_concerr = calibration_data.at(current_file).second;
 		//if(lastconc==current_conc) continue; /// hack because i messed up, skip this file
@@ -281,6 +313,7 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_fil
 		concentrations.push_back(current_conc);
 		concentration_errs.push_back(current_concerr);
 		
+		//std::cout<<"adding point to calibration curve"<<std::endl;
 		// add to the calibration data curve
 		calib_curve_raw->SetPoint(next_graph_point,current_conc,metric_and_err.at("raw").first);
 		calib_curve_simple->SetPoint(next_graph_point,current_conc,metric_and_err.at("simple").first);
@@ -296,7 +329,7 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_fil
 		// 00113_06Jun22Calib_99.root
 		std::string thismeasnum = current_file.substr(current_file.find_last_of("_")+1,current_file.length()-24);
 		int this_meas_num = std::stoi(thismeasnum);
-		std::cout<<"file "<<current_file<<" is measurement "<<this_meas_num<<std::endl;
+		//std::cout<<"file "<<current_file<<" is measurement "<<this_meas_num<<std::endl;
 		measnums.push_back(this_meas_num);
 		/*
 		std::cout<<"raw diff: "<<raw_peaks.first<<" - "<<raw_peaks.second<<" = "<<raw_peaks.first-raw_peaks.second<<std::endl;
@@ -330,6 +363,7 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_fil
 	std::vector<double> calib_coefficients_complex(calib_func_complex->GetParameters(),calib_func_complex->GetParameters()+npar);
 	
 	// print for info
+	/*
 	for(int i=0; i<npar; ++i){
 		std::cout<<"calibration coefficient "<<i<<":\n"
 		         <<"raw: "<<calib_coefficients_raw.at(i)
@@ -342,6 +376,7 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_fil
 	         <<" = "<<(calib_func_simple->GetChisquare()/calib_func_simple->GetNDF())<<std::endl;
 	std::cout<<"complex fit chi2/NDF = "<<calib_func_complex->GetChisquare()<<"/"<<calib_func_complex->GetNDF()
 	         <<" = "<<(calib_func_complex->GetChisquare()/calib_func_complex->GetNDF())<<std::endl;
+	*/
 	
 	// save to file
 	std::string parfilename = "../GDConcMeasure/fitParams_"+ name + "_" + dataset + ".root";
@@ -358,36 +393,47 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_fil
 	fparams->Close();
 	delete fparams;
 	
-	TCanvas cc("cc","cc",1024,800);
+	TCanvas* cc = nullptr;
+	//cc = new TCanvas("cc","cc",1024,800);
+	// drawing the tgraphs and functions here seems to kill them when we close the canvas
+	// so that when we then try to draw both LEDs together in Execute, it segs. :(
+	if(name=="275_A"){
+		calib_curve_raw->SetMarkerStyle(20);
+		calib_curve_simple->SetMarkerStyle(20);
+		calib_curve_complex->SetMarkerStyle(20);
+	} else if(name=="275_B"){
+		calib_curve_raw->SetMarkerStyle(34);
+		calib_curve_simple->SetMarkerStyle(34);
+		calib_curve_complex->SetMarkerStyle(34);
+	}
 	calib_curve_simple->SetLineColor(kRed);
 	calib_curve_simple->SetLineWidth(0);
-	calib_curve_simple->SetMarkerStyle(20);
 	calib_curve_simple->SetMarkerColor(kRed);
-	calib_curve_simple->Draw("AP");
+	if(cc) calib_curve_simple->Draw("AP");
 	calib_func_simple->SetLineWidth(1);
 	calib_func_simple->SetLineColor(kRed);
-	calib_func_simple->Draw("same");
+	if(cc) calib_func_simple->Draw("same");
 	
 	calib_curve_complex->SetLineWidth(0);
 	calib_curve_complex->SetLineColor(kBlue);
-	calib_curve_complex->SetMarkerStyle(20);
 	calib_curve_complex->SetMarkerColor(kBlue);
-	calib_curve_complex->Draw("same P");
+	if(cc) calib_curve_complex->Draw("same P");
 	calib_func_complex->SetLineWidth(1);
 	calib_func_complex->SetLineColor(kBlue);
-	calib_func_complex->Draw("same");
+	if(cc) calib_func_complex->Draw("same");
 	
 	calib_curve_raw->SetLineColor(kSpring-5);
 	calib_curve_raw->SetLineWidth(0);
-	calib_curve_raw->SetMarkerStyle(20);
 	calib_curve_raw->SetMarkerColor(kSpring-5);
-	calib_curve_raw->Draw("same P");
+	if(cc) calib_curve_raw->Draw("same P");
 	calib_func_raw->SetLineWidth(1);
 	calib_func_raw->SetLineColor(kSpring-5);
-	calib_func_raw->Draw("same");
+	if(cc) calib_func_raw->Draw("same");
 	
-	cc.Modified();
-	cc.Update();
+	if(cc){
+		cc->Modified();
+		cc->Update();
+	}
 	
 	/*
 	TGraph residuals_raw(next_graph_point);
@@ -413,12 +459,16 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_fil
 	ccc.Update();
 	*/
 	
+	/*
+	// draw concentration vs measurement number
+	// and metric vs measurement number
 	TCanvas c4("c4","c4",1024,800);
 	std::vector<double> numberline(concentrations.size());
 	std::iota(numberline.begin(), numberline.end(), 0);
 	std::vector<double> zeros(concentrations.size()); // errors on measurement number: 0
 	std::fill(zeros.begin(), zeros.end(), 0);
 	TGraphErrors g4(concentrations.size(), measnums.data(), concentrations.data(), zeros.data(), concentration_errs.data());
+	g4.SetTitle("true_conc;measurement num;concentration [%]");
 	g4.Draw("ALP");
 	c4.Modified();
 	c4.Update();
@@ -426,6 +476,7 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_fil
 	//TCanvas c5("c5","c5",1024,800);
 	// to try to compare shapes, scale to the same max value then plot on the same canvas
 	TGraph g5(concentrations.size(), measnums.data(), calib_curve_raw->GetY()); //, zeros.data(), calib_curve_raw->GetEY());
+	g5.SetTitle("metric_raw;measurement num;raw metric");
 	g5.SetLineColor(kRed);
 	g5.SetMarkerColor(kRed);
 	g5.SetMarkerStyle(22);
@@ -433,7 +484,7 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_fil
 	Float_t rightmax = (*std::max_element(g5.GetY(),g5.GetY()+g5.GetN()));
 	Float_t rightmin = (*std::min_element(g5.GetY(),g5.GetY()+g5.GetN()));
 	Float_t scale = gPad->GetUymax()/(1.1*rightmax);  // Uymax is 1.1 * max
-	std::cout<<"scaling is "<<scale<<std::endl;
+	//std::cout<<"scaling is "<<scale<<std::endl;
 	for(int i=0; i<g5.GetN(); ++i) g5.GetY()[i] *= scale;
 	g5.Draw("LP same");
 	//draw associated axis on the right side
@@ -443,14 +494,21 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_fil
 	axis->SetLabelColor(kRed);
 	axis->SetLabelSize(0.03);
 	axis->Draw();
+	*/
 	
+	// hold to allow user to inspect, including any other local graphs
+	std::cout<<"waiting for user to close canvas cc"<<std::endl;
 	gSystem->ProcessEvents();
 	while(gROOT->FindObject("cc")!=nullptr){
 		gSystem->ProcessEvents();
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	}
+	std::cout<<"Done!"<<std::endl;
 	
-	std::cout<<"returning multigraph"<<std::endl;
+	TMultiGraph* mg_calibs = new TMultiGraph(title.c_str(), title.c_str());
+	mg_calibs->Add(calib_curve_simple);
+	mg_calibs->Add(calib_curve_complex);
+	mg_calibs->Add(calib_curve_raw);
 	return mg_calibs;
 	
 }
@@ -458,9 +516,19 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string concs_fil
 // Main Function Part 2 - Fitting Stability Data
 // ---------------------------------------------
 
-TMultiGraph* Plotter::FitStabilityData(std::string name, std::string dataset){
+TMultiGraph* Plotter::FitStabilityData(std::string name, std::string dataset, std::string concs_file){
 	
+	if(concs_file!=""){
+		// validating calibration data: plot measured conc vs true conc
+		// load calibration info that specifies our concentrations
+		std::cout<<"loading true concentrations"<<std::endl;
+		bool ok = LoadConcentrations(concs_file);
+		if(!ok) return nullptr;
+	}
 	
+	// get the pure function.
+	purefile="../GDConcMeasure/pureDarkSubtracted_"+ name + "_" + dataset + ".root";
+	std::cout<<"getting pure "<<purefile<<std::endl;
 	TF1* pureplusextras = PureScaledPlusExtras();
 	
 	TChain* c_led = chains.at(name);
@@ -495,6 +563,7 @@ TMultiGraph* Plotter::FitStabilityData(std::string name, std::string dataset){
 	
 	// for converting metric to concentration
 	std::string parfilename = "../GDConcMeasure/fitParams_"+ name + "_" + dataset + ".root";
+	std::cout<<"getting calibration params from "<<parfilename<<std::endl;
 	TFile* fparams = TFile::Open(parfilename.c_str(),"READ");
 	TTree* tparams = (TTree*)fparams->Get("params");
 	std::vector<double> calib_coefficients_raw;
@@ -517,23 +586,62 @@ TMultiGraph* Plotter::FitStabilityData(std::string name, std::string dataset){
 	calib_curve_complex.SetParameters(calib_coefficients_complex.data());
 	
 	int n_concentration_vals=-1;
+	std::cout<<"analysing "<<n_entries<<" entries"<<std::endl;
 	for(int i=0; i<n_entries; i++){
 		
-		std::cout<<i<<"\n";
-		
+		std::cout<<i<<": ";
 		std::map<std::string, std::pair<double,double>> metric_and_err;
 		bool ok = GetMetrics(name, i, pureplusextras, metric_and_err);
-		if(!ok) continue;
+		//if(!ok) continue;
 		
-		++n_concentration_vals;
+		std::string current_file = c_led->GetTree()->GetCurrentFile()->GetName();
+		std::cout<<"filename: "<<current_file<<std::endl;
+		
+		std::cout<<"metrics:\nraw: "<<metric_and_err.at("raw").first
+		         <<", simple: "<<metric_and_err.at("simple").first
+		         <<", complex: "<<metric_and_err.at("complex").first<<std::endl;
 		
 		// solve for concentration (x) from absorbance (y), with 0.01 < x < 0.21
-		double conc_raw = calib_curve_raw.GetX(metric_and_err.at("raw").first, 0.001, 0.25);
-		double conc_simple = calib_curve_simple.GetX(metric_and_err.at("simple").first, 0.001, 0.25);
-		double conc_complex = calib_curve_complex.GetX(metric_and_err.at("complex").first, 0.001, 0.25);
-		g_concentrations_raw->SetPoint(n_concentration_vals,n_concentration_vals,conc_raw);
-		g_concentrations_simple->SetPoint(n_concentration_vals,n_concentration_vals,conc_simple);
-		g_concentrations_complex->SetPoint(n_concentration_vals,n_concentration_vals,conc_complex);
+		// XXX note that the pol6 is not monotonic, so we MUST constrain the range
+		// to find a solution in the first monotonic region.
+		// (TODO perhaps we could find the first point of inflexion and set that as the upper limit?)
+		// (this is only really a problem when re-analysing calibration data as we go right
+		// to the edge of the calibrated range - data won't do that)
+		double conc_raw = calib_curve_raw.GetX(metric_and_err.at("raw").first, 0.001, 0.23);
+		double conc_simple = calib_curve_simple.GetX(metric_and_err.at("simple").first, 0.001, 0.23);
+		double conc_complex = calib_curve_complex.GetX(metric_and_err.at("complex").first, 0.001, 0.23);
+	
+		std::cout<<"concentrations:\nraw: "<<conc_raw
+		         <<", simple: "<<conc_simple
+		         <<", complex: "<<conc_complex<<std::endl;
+		
+		++n_concentration_vals;
+		double x_val = n_concentration_vals;
+		
+		// if doing validation of calibration data, plot measured conc vs true conc
+		// this should be a straight line along y=x, with small fluctuations 
+		// from fitting the calibration datapoints with a pol6
+		if(concs_file!=""){
+			// strip off preceding path to get key in concentrations map
+			if(current_file.find("/")!=std::string::npos){
+				current_file = current_file.substr(current_file.find_last_of("/")+1,std::string::npos);
+			}
+			if(calibration_data.count(current_file)==0){
+				std::cerr<<"Couldn't find file "<<current_file<<" in calibration data map!"<<std::endl;
+				for(auto&& am : calibration_data){
+					std::cerr<<am.first<<", ";
+				}
+				std::cout<<std::endl;
+				break;
+				return nullptr;
+			}
+			x_val = calibration_data.at(current_file).first;
+			std::cout<<"true conc: "<<x_val<<std::endl;
+		}
+		
+		g_concentrations_raw->SetPoint(n_concentration_vals,x_val,conc_raw);
+		g_concentrations_simple->SetPoint(n_concentration_vals,x_val,conc_simple);
+		g_concentrations_complex->SetPoint(n_concentration_vals,x_val,conc_complex);
 		
 		/* FIXME TODO
 		// error on concentration is error on height times gradient at that point
@@ -560,7 +668,7 @@ TMultiGraph* Plotter::FitStabilityData(std::string name, std::string dataset){
 // Fitting Data
 // ============
 
-bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* pureplusextras, std::map<std::string,std::pair<double,double>> metric_and_err){
+bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* pureplusextras, std::map<std::string,std::pair<double,double>>& metric_and_err){
 	
 	TChain* c_led = chains.at(ledname);
 	TChain* c_dark = chains.at("dark");
@@ -633,8 +741,32 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* pureplusextras,
 	g_other->SetName(othertitle.c_str());
 	
 	// fit with pure scaled
-	g_sideband->Fit(pureplusextras,"RNQ");
+	std::cout<<"fitting sideband"<<std::endl;
+	g_sideband->Fit(pureplusextras,"RNMQ");
+	///*
+	TCanvas ccnew("ccnew","ccnew",1024,800);
+	g_sideband->SetMarkerColor(kRed);
+	g_sideband->SetMarkerStyle(2);
+	g_inband->SetMarkerColor(kBlue);
+	g_inband->SetMarkerStyle(2);
+	g_inband->Draw("AP");
+	g_sideband->Draw("same P");
+	pureplusextras->Draw("same");
+	// these have to go *after* a draw or the graph has no axes
+	//g_abs->GetYaxis()->SetRangeUser(-0.1,0.6);
+	g_abs->GetXaxis()->SetRangeUser(240,320);
+	ccnew.Modified();
+	ccnew.Update();
+	gSystem->ProcessEvents();
+	std::cout<<"waiting for user to close canvas"<<std::endl;
+	while(gROOT->FindObject("ccnew")!=nullptr){
+		gSystem->ProcessEvents();
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	//*/
 	
+	std::cout<<"generating absorption graph"<<std::endl;
 	// calculate absorbance from ratio of fit to data in absorption region
 	TGraphErrors* g_abs = new TGraphErrors(inband_values.size());
 	std::string restitle = "g_abs_"+std::to_string(entrynum);
@@ -670,6 +802,7 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* pureplusextras,
 	}
 	
 	// as the simplest estimate of peak heights, just take the graph value at the peaks.
+	std::cout<<"getting raw peaks"<<std::endl;
 	std::pair<double,double> raw_peaks;
 	double wlval;
 	g_abs->GetPoint(sample_273, wlval, raw_peaks.first);
@@ -696,12 +829,14 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* pureplusextras,
 	// We may do better by interpolating the peak to find a better estimate of maximum.
 	// We can do this by fitting the peaks with gaussians, but since these are peaks
 	// on a non-uniform background, we can only fit within a narrow region close to the peak.
+	std::cout<<"getting simple peaks"<<std::endl;
 	std::pair<double,double> simple_peaks, simple_errs, simple_posns;
 	int ok = FitTwoGaussians(g_abs, simple_peaks, simple_errs, simple_posns);
 	// total error from adding in quadrature
 	double simplerr = sqrt(TMath::Sq(simple_errs.first)+TMath::Sq(simple_errs.second));
 	
 	// fit it with a combination of 4 gaussians
+	std::cout<<"getting complex peaks"<<std::endl;
 	TF1* abs_func = GetFourGausFit();  // we own the returned TF1
 	// The fit has a tendency to screw up, so seed the initial values based on the raw fit.
 	// These initial values will be over-estimates, since the complex fit peak heights also
@@ -787,14 +922,27 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* pureplusextras,
 
 int Plotter::LoadData(std::string filepattern){
 	
-	for(auto&& c : chains){
-		c.second->Add(filepattern.c_str());
+	std::string lscommand = "ls -v " + filepattern + " 2>/dev/null";
+	//std::cout<<"lscommand is '"<<lscommand<<"'"<<std::endl;
+	std::string fileliststring = GetStdoutFromCommand(lscommand);
+	fileliststring.erase(fileliststring.find_last_not_of(" \t\n\015\014\013")+1);  // strip trailing whitespace
+	
+	std::stringstream ssl;
+	ssl << fileliststring;
+	std::string nextfilestring;
+	std::vector<std::string> paths;
+	
+	while(getline(ssl,nextfilestring)){
+		std::cout<<"adding "<<nextfilestring<<std::endl;
+		for(auto&& c : chains){
+			c.second->Add(nextfilestring.c_str());
+		}
+		c_dark->Add(nextfilestring.c_str());
 	}
-	c_dark->Add(filepattern.c_str());
 	
 	// get number of measurements
 	num_meas = c_275_A->GetEntries();
-	std::cout<<"had "<<num_meas<<" calibration entries"<<std::endl;
+	std::cout<<"had "<<num_meas<<" data files"<<std::endl;
 	
 	return num_meas;
 }
@@ -889,6 +1037,9 @@ double PureFuncv2(double* x, double* par){
 // this concstruct the TF1 functional fit, based on the above c-function
 TF1* Plotter::PureScaledPlusExtras(){
 	
+	if(dark_subtracted_pure) delete dark_subtracted_pure;
+	dark_subtracted_pure=nullptr;
+	
 	// construct functional fit. We'll scale and add a linear background.
 	// limit the pure function to a region in which we have light - no point fitting outside this region
 	static int purever=0;
@@ -941,8 +1092,8 @@ int Plotter::FitTwoGaussians(TGraph* abs_graph, std::pair<double,double>& simple
 	
 	double gaus1amperr = gaus1.GetParError(0);
 	double gaus2amperr = gaus2.GetParError(0);
-	std::cout<<"simple peak fit gaus 1 has ampltiude "<<gausamp1<<"+-"<<gaus1amperr<<std::endl;
-	std::cout<<"simple peak fit gaus 2 has ampltiude "<<gausamp2<<"+-"<<gaus2amperr<<std::endl;
+	//std::cout<<"simple peak fit gaus 1 has ampltiude "<<gausamp1<<"+-"<<gaus1amperr<<std::endl;
+	//std::cout<<"simple peak fit gaus 2 has ampltiude "<<gausamp2<<"+-"<<gaus2amperr<<std::endl;
 	
 	if(plot){
 		TCanvas ctemp("ctemp","ctemp",1024,800);
@@ -1142,9 +1293,9 @@ std::pair<double,double> Plotter::CalculateError(TF1* abs_func, double peak1_pos
 		// at peak 1, compared to at the centre
 		double error_here = error_centre*relative_amp;
 		
-		std::cout<<"complex peak fit gaus "<<i<<" has ampltiude "
-		         <<agaus.GetParameter(0)<<"+-"<<error_centre<<" scaled by "
-		         <<relative_amp<<" to "<<error_here<<" at peak 1";
+		//std::cout<<"complex peak fit gaus "<<i<<" has ampltiude "
+		//         <<agaus.GetParameter(0)<<"+-"<<error_centre<<" scaled by "
+		//         <<relative_amp<<" to "<<error_here<<" at peak 1";
 		
 		totalerror1+= TMath::Sq(error_here);
 		
@@ -1154,14 +1305,14 @@ std::pair<double,double> Plotter::CalculateError(TF1* abs_func, double peak1_pos
 		// scale the error on the amplitude at the centre
 		error_here = error_centre*relative_amp;
 		
-		std::cout<<" and scaled by "<<relative_amp<<" to "<<error_here<<" at peak 2"<<std::endl;
+		//std::cout<<" and scaled by "<<relative_amp<<" to "<<error_here<<" at peak 2"<<std::endl;
 		
 		totalerror2+= TMath::Sq(error_here);
 	}
 	
 	// take sqrt of totalerror1 and totalerror2 each to get quadrature sum of contributions...
 	// but then take square to add the errors on the two peak amplitudes in quadrature
-	std::cout<<"total error at peak 1 "<<sqrt(totalerror1)<<" and at peak 2 "<<sqrt(totalerror2)<<std::endl;
+	//std::cout<<"total error at peak 1 "<<sqrt(totalerror1)<<" and at peak 2 "<<sqrt(totalerror2)<<std::endl;
 	
 	return std::pair<double,double>{sqrt(totalerror1),sqrt(totalerror2)};
 }
@@ -1240,6 +1391,7 @@ bool Plotter::LoadConcentrations(std::string filename){
 		calibration_data.emplace(fname, std::pair<double,double>{strtod(conc.c_str(), nullptr),strtod(concerr.c_str(), nullptr)});
 	}
 	calib_data_file.close();
+	std::cout<<"had "<<calibration_data.size()<<" calibration concentrations"<<std::endl;
 	
 	return true;
 }
@@ -1335,5 +1487,26 @@ bool Plotter::MakePure(std::string name, bool overwrite){
 	graph.SaveAs(purefile.c_str());
 	
 	return true;
+}
+
+std::string Plotter::GetStdoutFromCommand(std::string cmd, int bufsize){
+	/*
+	  credit: Jeremy Morgan, source:
+	  https://www.jeremymorgan.com/tutorials/c-programming/how-to-capture-the-output-of-a-linux-command-in-c/
+	*/
+	std::string data;
+	FILE * stream;
+	char* buffer = new char[bufsize];
+	cmd.append(" 2>&1");
+	
+	stream = popen(cmd.c_str(), "r");
+	if(stream){
+		while(!feof(stream)){
+			if (fgets(buffer, bufsize, stream) != NULL) data.append(buffer);
+		}
+		pclose(stream);
+	}
+	delete[] buffer;
+	return data;
 }
 
