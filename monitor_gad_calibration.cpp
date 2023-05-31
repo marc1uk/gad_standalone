@@ -62,7 +62,9 @@ class Plotter{
 	std::map<std::string,int> offsets;
 	int n_datapoints;
 	int num_meas;
+	int refentry=0;
 	int darksperloop=12;
+	
 	std::map<std::string, std::pair<double,double>> calibration_data;
 	std::string purerefset;
 	bool do_calibration;
@@ -80,6 +82,7 @@ class Plotter{
 	int SetBranchAddresses();
 	int GetNextDarkEntry(std::string name, int ledon_entry_num, bool check=true);
 	
+	std::string purerefset;
 	bool CheckPath(std::string path, std::string& type);
 	TGraphErrors* MakePure(std::string name, bool overwrite=false);
 	bool LoadConcentrations(std::string filename);
@@ -92,6 +95,10 @@ class Plotter{
 	
 	TF1* GetAbsFunc();
 	std::map<std::string, TMultiGraph*> FitCalibrationData(std::string name, bool make_cal_curve);
+	// for saving fit parameters
+	std::map<std::string, TTree*> paramtrees;
+	std::vector<double> purefitpars; std::vector<double>* purefitparsp;
+	std::vector<double> complexfitpars; std::vector<double>* complexfitparsp;
 	
 	void SetTimeAxis(TH1* hist, long t0_seconds);
 	std::vector<std::string> GetListOfFiles(std::string inputdir);
@@ -224,6 +231,17 @@ int main(int argc, const char* argv[]){
 	// read configs, create toolchains and set branch addresses
 	myplotter.Initialise(configfile);
 	
+	// output file for pure fit parameters
+	TFile* fpure = new TFile("monitor_fitparams.root","RECREATE");
+	myplotter.paramtrees.emplace("275_A", new TTree("LED275A", "LED275A"));
+	myplotter.paramtrees.emplace("275_B", new TTree("LED275B", "LED275B"));
+	myplotter.purefitparsp = &myplotter.purefitpars;
+	myplotter.paramtrees.at("275_A")->Branch("purefits", &myplotter.purefitparsp);
+	myplotter.paramtrees.at("275_B")->Branch("purefits", &myplotter.purefitparsp);
+	myplotter.complexfitparsp = &myplotter.complexfitpars;
+	myplotter.paramtrees.at("275_A")->Branch("complexfits", &myplotter.complexfitparsp);
+	myplotter.paramtrees.at("275_B")->Branch("complexfits", &myplotter.complexfitparsp);
+	
 	// each execute call will return a map of various different plots
 	std::map<std::string,TMultiGraph*> plots;
 	// we'll need a canvas for each
@@ -269,6 +287,7 @@ int main(int argc, const char* argv[]){
 					canvases[canvasname] = next_canv;
 					next_canv->cd();
 					aplot.second->Draw("AXP");
+					//aplot.second->GetYaxis()->SetRangeUser(0,0.35);
 					next_canv->Modified();
 					next_canv->Update();
 					gSystem->ProcessEvents();
@@ -277,6 +296,7 @@ int main(int argc, const char* argv[]){
 				}
 				
 				last_num_files = myplotter.files.size();
+				fpure->Write("*",TObject::kOverwrite);
 			}
 		}
 		
@@ -513,7 +533,7 @@ int Plotter::Initialise(std::string configfile){
 	};
 	
 	SetBranchAddresses();
-
+	
 	bool ok = LoadConfig(configfile);
 	
 	return ok;
@@ -523,8 +543,18 @@ std::map<std::string,TMultiGraph*> Plotter::Execute(){
 	
 	// step 1: analyse calibration data for polynomial coffiecients
 	std::cout<<"calling FitCalibData with do_calibration: "<<do_calibration<<std::endl;
+	std::cout<<"Fitting calibration data for UV LED A"<<std::endl;
 	std::map<std::string, TMultiGraph*> plots_A = FitCalibrationData("275_A",do_calibration);
+	std::cout<<"Fitting calibration data for UV LED B"<<std::endl;
 	std::map<std::string, TMultiGraph*> plots_B = FitCalibrationData("275_B",do_calibration);
+	for(auto& aplotset : plots_A){
+		aplotset.second->GetHistogram()->GetXaxis()->SetTitle("concentration [%Gd]");
+		aplotset.second->GetHistogram()->GetYaxis()->SetTitle("Peak height diff [no units]");
+	}
+	for(auto& aplotset : plots_B){
+		aplotset.second->GetHistogram()->GetXaxis()->SetTitle("concentration [%Gd]");
+		aplotset.second->GetHistogram()->GetYaxis()->SetTitle("Peak height diff [no units]");
+	}
 	
 	// combine plots
 	//plots_A.insert(plots_B.begin(),plots_B.end());
@@ -546,6 +576,27 @@ std::map<std::string,TMultiGraph*> Plotter::Execute(){
 			g->SetMarkerStyle(5);
 		}
 	}
+	
+	// for comparison, also plot the true concentrations for input
+	/*
+	std::vector<double> calib_concs;
+	for(auto&& acalibmeas : calibration_data){
+		calib_concs.push_back(acalibmeas.second.first);
+	}
+	std::cout<<"we had "<<calib_concs.size()<<" calibration measurements and "
+	         <<num_meas<<" data measurements"<<std::endl;
+	std::vector<double> numberline(calib_concs.size());
+	std::iota(numberline.begin(),numberline.end(),0);
+	TGraph* calgraph = new TGraph(calib_concs.size(), numberline.data(), calib_concs.data());
+	calgraph->SetLineColor(kMagenta);
+	calgraph->SetMarkerColor(kMagenta);
+	calgraph->SetMarkerStyle(30);
+	TMultiGraph* mg_true = new TMultiGraph("mg_true","mg_true");
+	mg_true->Add(calgraph);
+	plots_A.emplace("true",mg_true);
+	*/
+	
+	
 	
 	/* actually, we can't parallelise these: they both use the same plotter object
 	   so will all be sharing member variables, which isn't supported. yet.
@@ -579,15 +630,15 @@ double PureFuncv2(double* x, double* par){
 	
 	TGraphErrors* dark_subbed_pure = (TGraphErrors*)(dark_sub_pures.at(par[8]));
 	
-	double purepart = (par[0] * dark_subbed_pure->Eval((par[1]*x[0])+par[2]));
-	double linpart = (par[4] * x[0]) + par[3];
+	double purepart = (par[0] * dark_subbed_pure->Eval((par[1]*x[0]-276.)+276.+par[2]));
+	double linpart = (par[4] * (x[0]-276.)) + par[3];
 	double shoulderpart = par[5]*exp(-0.5*TMath::Sq((x[0]-282.-abs(par[6]))/par[7]));
 	double retval = purepart + linpart + shoulderpart;
 	
 	return retval;
 }
 
-TF1* Plotter::PureScaledPlusExtras(int led_num){
+TF1* Plotter::PureScaledPlusExtras(){
 	
 	// construct functional fit. We'll scale and add a linear background.
 	// limit the pure function to a region in which we have light - no point fitting outside this region
@@ -627,7 +678,7 @@ TF1* Plotter::GetAbsFunc(){
 	// par [7] = peak 1 LH shoulder position
 	// par [8] = peak 1 LH shoulder width
 	
-	// par [9]  = amplitude of peak 2
+	// par [9]  = amplitude of peak 2 (relative to peak 1)
 	// par [10] = peak 2 position
 	// par [11] = peak 2 width
 	twinpeaks->SetParName(0,"peak 1 amp");
@@ -804,6 +855,7 @@ std::map<std::string, TMultiGraph*> Plotter::FitCalibrationData(std::string name
 		// already have this pure reference in memory
 		pure_index = dark_sub_pures_byname.at(name);
 	}
+	
 	// construct the pure water function based on the pure water trace.
 	TF1* pureplusextras = PureScaledPlusExtras(pure_index);
 	pureplusextras->SetLineColor(kBlack);
@@ -924,8 +976,12 @@ std::map<std::string, TMultiGraph*> Plotter::FitCalibrationData(std::string name
 		g_sideband->SetMarkerStyle(5);
 		
 		// fit with pure scaled
-		std::cout<<"fitting pure"<<std::endl;
-		g_sideband->Fit(pureplusextras,"RNQ");
+		//std::cout<<"fitting pure"<<std::endl;
+		g_sideband->Fit(pureplusextras,"RNQM");
+		
+		// save pure fit parameters
+		*purefitparsp = std::vector<double>(pureplusextras->GetParameters(), pureplusextras->GetParameters()+pureplusextras->GetNpar());
+		
 		// save an image to check the fit
 		std::string purename = "images/purefit_"+name+"_"+std::to_string(i)+".png";
 		/*if(!draw)*/ gROOT->SetBatch(true);
@@ -1002,6 +1058,12 @@ std::map<std::string, TMultiGraph*> Plotter::FitCalibrationData(std::string name
 		std::string complexname = "images/complex_"+name+"_"+std::to_string(i)+".png";
 		std::cout<<"fitting complex"<<std::endl;
 		ok = DoComplexFit(g_abs, peak_posns_complex, peak_heights_complex, peak_errs_complex, peak_heights_raw, complexname);
+		
+		// save complex fit parameters
+		*complexfitparsp = std::vector<double>(abs_func->GetParameters(), abs_func->GetParameters()+abs_func->GetNpar());
+		
+		// add pure and complex fit par entries to output tree
+		paramtrees.at(name)->Fill();
 		
 		double raw_peakdiff = peak_heights_raw.first - peak_heights_raw.second;
 		double raw_peakdiff_err = sqrt(TMath::Sq(peak_errs_raw.first)+TMath::Sq(peak_errs_raw.second));
@@ -1309,6 +1371,11 @@ std::map<std::string, TMultiGraph*> Plotter::FitCalibrationData(std::string name
 		g_conc_raw->SetTitle(title.c_str());
 		g_conc_raw->SetLineColor(kSpring-5);
 		g_conc_raw->SetMarkerColor(kSpring-5);
+		if(name=="275_A"){
+			g_conc_raw->SetMarkerStyle(20);
+		} else if(name=="275_B"){
+			g_conc_raw->SetMarkerStyle(30); // 30=☆, 34=+
+		}
 		
 		TGraphErrors* g_conc_simple = new TGraphErrors(numberline.size(), numberline.data(), simple_concentrations.data(), zeros.data(), simple_concentration_errs.data());
 		title="g_conc_simple_"+name;
@@ -1316,6 +1383,11 @@ std::map<std::string, TMultiGraph*> Plotter::FitCalibrationData(std::string name
 		g_conc_simple->SetTitle(title.c_str());
 		g_conc_simple->SetLineColor(kRed);
 		g_conc_simple->SetMarkerColor(kRed);
+		if(name=="275_A"){
+			g_conc_simple->SetMarkerStyle(20);
+		} else if(name=="275_B"){
+			g_conc_simple->SetMarkerStyle(30); // 30=☆, 34=+
+		}
 		
 		TGraphErrors* g_conc_complex = new TGraphErrors(numberline.size(), numberline.data(), complex_concentrations.data(), zeros.data(), complex_concentration_errs.data());
 		title="g_conc_complex_"+name;
@@ -1323,6 +1395,11 @@ std::map<std::string, TMultiGraph*> Plotter::FitCalibrationData(std::string name
 		g_conc_complex->SetTitle(title.c_str());
 		g_conc_complex->SetLineColor(kBlue);
 		g_conc_complex->SetMarkerColor(kBlue);
+		if(name=="275_A"){
+			g_conc_complex->SetMarkerStyle(20);
+		} else if(name=="275_B"){
+			g_conc_complex->SetMarkerStyle(30); // 30=☆, 34=+
+		}
 		
 		// save results
 		title = "mg_concs_"+name;
@@ -1454,7 +1531,7 @@ TGraphErrors* Plotter::MakePure(std::string name, bool overwrite){
 	for(int j=0; j<n_datapoints; ++j){
 		values.at(j) -= values_dark.at(j);
 	}
-
+	
 	// build errors
 	std::vector<double> xerrs, yerrs;
 	for(int j=0; j<n_datapoints; ++j){
@@ -1666,11 +1743,11 @@ bool Plotter::DoSimpleFit(TGraph* abs_graph, std::pair<double,double>& peak_posn
 	
 	bool ok = 1;
 	// note that these are not necessarily reliable indicators of whether the fit was ok or not
-	if(gfptr1->IsEmpty() || !gfptr1->IsValid() || gfptr1->Status()!=0){
+	if(gfptr1->IsEmpty() || !gfptr1->IsValid() /*|| gfptr1->Status()!=0*/){
 		std::cerr<<"gaus1 fit failed"<<std::endl;
 		ok = 0;
 	}
-	if(gfptr2->IsEmpty() || !gfptr2->IsValid() || gfptr2->Status()!=0){
+	if(gfptr2->IsEmpty() || !gfptr2->IsValid() /*|| gfptr2->Status()!=0*/){
 		std::cerr<<"gaus2 fit failed"<<std::endl;
 		ok = 0;
 	}
