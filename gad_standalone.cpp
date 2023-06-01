@@ -20,6 +20,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <vector>
 #include <map>
 #include <algorithm>
@@ -79,10 +80,11 @@ class Plotter{
 	std::pair<double,double> CalculateError(TF1* abs_func, double peak1_pos, double peak2_pos);
 	int FitTwoGaussians(TGraph* abs_graph, std::pair<double,double>& simple_peaks, std::pair<double,double>& simple_errs, std::pair<double,double>& simple_posns, bool plot=false);
 	TF1* PureScaledPlusExtras();
+	TF1* GetLaungaus(); // tried it, not great.
 	TF1* GetFourGausFit();
 	
 	// misc
-	bool GetMetrics(std::string ledname, int entrynum, TF1* pureplusextras, std::map<std::string,std::pair<double,double>>& metric_and_err);
+	bool GetMetrics(std::string ledname, int entrynum, TF1* purefit, std::map<std::string,std::pair<double,double>>& metric_and_err);
 	int GetNextDarkEntry(std::string name, int ledon_entry_num);
 	
 	int sample_273=0;
@@ -248,7 +250,8 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string dataset, 
 	}
 	
 	std::cout<<"getting reference pure"<<std::endl;
-	TF1* pureplusextras = PureScaledPlusExtras();
+	TF1* purefit = PureScaledPlusExtras();
+	//TF1* purefit = GetLaungaus();
 	
 	TChain* c_led = chains.at(name);
 	int n_entries = c_led->GetEntries();
@@ -281,7 +284,7 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string dataset, 
 		std::cout<<i<<": ";
 		
 		std::map<std::string, std::pair<double,double>> metric_and_err;
-		ok = GetMetrics(name, i, pureplusextras, metric_and_err);
+		ok = GetMetrics(name, i, purefit, metric_and_err);
 		//std::cout<<"GetMetrics returned "<<ok<<std::endl;
 		// XXX should we 'continue' if false?
 		
@@ -529,7 +532,8 @@ TMultiGraph* Plotter::FitStabilityData(std::string name, std::string dataset, st
 	// get the pure function.
 	purefile="../GDConcMeasure/pureDarkSubtracted_"+ name + "_" + dataset + ".root";
 	std::cout<<"getting pure "<<purefile<<std::endl;
-	TF1* pureplusextras = PureScaledPlusExtras();
+	TF1* purefit = PureScaledPlusExtras();
+//	TF1* purefit = GetLaungaus();
 	
 	TChain* c_led = chains.at(name);
 	TChain* c_dark = chains.at("dark");
@@ -591,7 +595,7 @@ TMultiGraph* Plotter::FitStabilityData(std::string name, std::string dataset, st
 		
 		std::cout<<i<<": ";
 		std::map<std::string, std::pair<double,double>> metric_and_err;
-		bool ok = GetMetrics(name, i, pureplusextras, metric_and_err);
+		bool ok = GetMetrics(name, i, purefit, metric_and_err);
 		//if(!ok) continue;
 		
 		std::string current_file = c_led->GetTree()->GetCurrentFile()->GetName();
@@ -668,7 +672,7 @@ TMultiGraph* Plotter::FitStabilityData(std::string name, std::string dataset, st
 // Fitting Data
 // ============
 
-bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* pureplusextras, std::map<std::string,std::pair<double,double>>& metric_and_err){
+bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* purefit, std::map<std::string,std::pair<double,double>>& metric_and_err){
 	
 	TChain* c_led = chains.at(ledname);
 	TChain* c_dark = chains.at("dark");
@@ -742,19 +746,20 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* pureplusextras,
 	
 	// fit with pure scaled
 	std::cout<<"fitting sideband"<<std::endl;
-	g_sideband->Fit(pureplusextras,"RNMQ");
+	g_sideband->Fit(purefit,"RNMQ");
 	///*
 	TCanvas ccnew("ccnew","ccnew",1024,800);
 	g_sideband->SetMarkerColor(kRed);
 	g_sideband->SetMarkerStyle(2);
 	g_inband->SetMarkerColor(kBlue);
 	g_inband->SetMarkerStyle(2);
-	g_inband->Draw("AP");
-	g_sideband->Draw("same P");
-	pureplusextras->Draw("same");
+	purefit->Draw();
+	g_inband->Draw("P same");
+	g_sideband->Draw("P same");
 	// these have to go *after* a draw or the graph has no axes
-	//g_abs->GetYaxis()->SetRangeUser(-0.1,0.6);
-	g_abs->GetXaxis()->SetRangeUser(240,320);
+	// do not seem to work, however...
+	//g_inband->GetYaxis()->SetRangeUser(-0.1,0.6);
+	//g_inband->GetXaxis()->SetRangeUser(240,320);
 	ccnew.Modified();
 	ccnew.Update();
 	gSystem->ProcessEvents();
@@ -773,7 +778,7 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* pureplusextras,
 	for(int k=0; k<inband_values.size(); ++k){
 		double wlval, dataval;
 		g_inband->GetPoint(k, wlval, dataval);
-		double fitval = pureplusextras->Eval(wlval);
+		double fitval = purefit->Eval(wlval);
 		g_abs->SetPoint(k, wlval, log10(fitval/dataval));
 		// error on ratio is sqrt((Δa/a)²+(Δb/b)²)
 		// https://www.statisticshowto.com/error-propagation/
@@ -1016,7 +1021,7 @@ double PureFuncv2(double* x, double* par){
 		dark_subtracted_pure = (TGraphErrors*)_file0->Get("Graph");
 		// minor optimization; if the data in the TGraph is sorted by x value
 		//(which it should be for us), then setting the following option can speed up Eval() calls
-		dark_subtracted_pure->SetBit(TGraph::kIsSortedX); // XXX note only available on newer ROOT
+		//dark_subtracted_pure->SetBit(TGraph::kIsSortedX); // XXX note only available on newer ROOT
 	}
 	// par [0] = y-scaling
 	// par [1] = x-scaling
@@ -1026,8 +1031,8 @@ double PureFuncv2(double* x, double* par){
 	// par [5] = shoulder gaussian scaling
 	// par [6] = shoulder gaussian centre, restricted to > 282nm (RH shoulder)
 	// par [7] = shoulder gaussian spread
-	double purepart = (par[0] * dark_subtracted_pure->Eval((par[1]*x[0])+par[2]));
-	double linpart = (par[4] * x[0]) + par[3];
+	double purepart = par[0] * dark_subtracted_pure->Eval((par[1]*(x[0]-276))+276+par[2]);
+	double linpart = (par[4] * (x[0]-276)) + par[3];
 	double shoulderpart = par[5]*exp(-0.5*TMath::Sq((x[0]-282.-abs(par[6]))/par[7]));
 	double retval = purepart + linpart + shoulderpart;
 	
@@ -1048,7 +1053,27 @@ TF1* Plotter::PureScaledPlusExtras(){
 	const int wave_min = 260, wave_max = 300, numb_of_fitting_parameters = 8;
 	TF1* pure = new TF1(name.c_str(), PureFuncv2, wave_min, wave_max, numb_of_fitting_parameters);
 	// set default parameters
-	pure->SetParameters(1.,1.,0.,0.,0.,0.,0.,10.);
+	//pure->SetParameters(1.,1.,0.,0.,0.,0.,0.,10.);
+	pure->SetParameters(17.,0.8,1.8,-0.9,-58,-10453,4.,9.);
+	
+	// set parameter limits
+	pure->SetParLimits(0,0,30);     // stretch y
+	pure->SetParLimits(1,0.8,1.2);  // stretch x
+	pure->SetParLimits(2,-20,20);   // x offset
+	pure->SetParLimits(3,-10,10);   // y offset
+	pure->SetParLimits(4,-500,10);   // linear baseline gradient
+	pure->SetParLimits(5,-15000,500); // shoulder gaussian amplitude XXX reduce
+	pure->SetParLimits(6,0,60);     // shoulder gaussian position - 282
+	pure->SetParLimits(7,0,50);     // shoulder gaussian width
+	
+	pure->SetParName(0,"y scaling");
+	pure->SetParName(1,"x scaling");
+	pure->SetParName(2,"x offset");
+	pure->SetParName(3,"y offset");
+	pure->SetParName(4,"linear gradient");
+	pure->SetParName(5,"shoulder amp");
+	pure->SetParName(6,"shoulder pos");
+	pure->SetParName(7,"shoulder width");
 	
 	return pure;
 	
@@ -1508,5 +1533,184 @@ std::string Plotter::GetStdoutFromCommand(std::string cmd, int bufsize){
 	}
 	delete[] buffer;
 	return data;
+}
+
+// ==================
+
+// Langaus
+// -------
+double combinedfunc(double* x, double* par);
+double landau_pdf(double x, double xi=1, double x0=0);
+double Landau(double x, double mu, double sigma=1, bool norm=false);
+double Gaus(double x, double mean=0, double sigma=1, bool norm=false);
+double langaufun(double *x, double *par);
+
+TF1* Plotter::GetLaungaus(){
+	double wave_min = 260, wave_max = 300;
+	TF1* fit = new TF1("fit",langaufun,wave_min,wave_max,4);
+	fit->SetParName(0,"landau width");
+	fit->SetParName(1,"landau centre");
+	fit->SetParName(2,"integral of landaugaus");
+	fit->SetParName(3,"width of centre gaus component");
+	
+	// these two are fairly straightforward
+	fit->SetParLimits(1,260,280);    // centre of peak
+	fit->SetParLimits(2,0.5E6,5E6);  // amplitude scaling
+	
+	// these two are the tricky ones that control shape: they both change the width
+	// and asymmetry, but they seem more or less to do the same thing...
+	// and still not achieve what's wanted. :(
+	fit->SetParLimits(0,0.5,7.);     // below 0.5 this breaks down
+	fit->SetParLimits(3,1,7);        // 
+	
+	// set initial values
+	std::vector<double> initvals{1., 273., 1.0E6, 5.};
+	fit->SetParameters(initvals.data());
+	return fit;
+}
+
+// copied from $ROOTSYS/tutorials/fit/langaus.C
+// dependant functions from TMath are copied below.
+double langaufun(double *x, double *par)
+{
+	
+	//Fit parameters:
+	//par[0]=Width (scale) parameter of Landau density
+	//par[1]=Most Probable (MP, location) parameter of Landau density
+	//par[2]=Total area (integral -inf to inf, normalization constant)
+	//par[3]=Width (sigma) of convoluted Gaussian function
+	//
+	//In the Landau distribution (represented by the CERNLIB approximation),
+	//the maximum is located at x=-0.22278298 with the location parameter=0.
+	//This shift is corrected within this function, so that the actual
+	//maximum is identical to the MP parameter.
+	
+	// Numeric constants
+	double invsq2pi = 0.3989422804014;   // (2 pi)^(-1/2)
+	double mpshift  = -0.22278298;       // Landau maximum location
+	
+	// Control constants
+	double np = 100.0;      // number of convolution steps
+	double sc =   5.0;      // convolution extends to +-sc Gaussian sigmas
+	
+	// Variables
+	double xx;
+	double mpc;
+	double fland;
+	double sum = 0.0;
+	double xlow,xupp;
+	double step;
+	double i;
+	
+	
+	// MP shift correction
+	mpc = par[1] - mpshift * par[0];
+	
+	// Range of convolution integral
+	xlow = x[0] - sc * par[3];
+	xupp = x[0] + sc * par[3];
+	
+	step = (xupp-xlow) / np;
+	
+	// Convolution integral of Landau and Gaussian by sum
+	for(i=1.0; i<=np/2; i++) {
+		xx = xlow + (i-.5) * step;
+		fland = Landau(xx,mpc,par[0]) / par[0];
+		sum += fland * Gaus(x[0],xx,par[3]);
+		
+		xx = xupp - (i-.5) * step;
+		fland = Landau(xx,mpc,par[0]) / par[0];
+		sum += fland * Gaus(x[0],xx,par[3]);
+	}
+	
+	return (par[2] * step * sum * invsq2pi / par[3]);
+}
+
+// copied from https://root.cern.ch/doc/master/TMath_8cxx_source.html#l00448
+double Gaus(double x, double mean, double sigma, bool norm)
+{
+	if (sigma == 0) return 1.e30;
+	double arg = (x-mean)/sigma;
+	// for |arg| > 39  result is zero in double precision
+	if (arg < -39.0 || arg > 39.0) return 0.0;
+	double res = std::exp(-0.5*arg*arg);
+	if (!norm) return res;
+	return res/(2.50662827463100024*sigma); //sqrt(2*Pi)=2.50662827463100024
+}
+
+// copied from https://root.cern.ch/doc/master/TMath_8cxx_source.html#l00448
+double Landau(double x, double mu, double sigma, bool norm)
+{
+	if (sigma <= 0) return 0;
+	double den = landau_pdf( (x-mu)/sigma );
+	if (!norm) return den;
+	return den/sigma;
+}
+
+// copied from https://root.cern.ch/doc/master/PdfFuncMathCore_8cxx_source.html#l00191 
+double landau_pdf(double x, double xi, double x0)
+{
+	// LANDAU pdf : algorithm from CERNLIB G110 denlan
+	// same algorithm is used in GSL
+	
+	static double p1[5] = {0.4259894875,-0.1249762550, 0.03984243700, -0.006298287635,   0.001511162253};
+	static double q1[5] = {1.0         ,-0.3388260629, 0.09594393323, -0.01608042283,    0.003778942063};
+	
+	static double p2[5] = {0.1788541609, 0.1173957403, 0.01488850518, -0.001394989411,   0.0001283617211};
+	static double q2[5] = {1.0         , 0.7428795082, 0.3153932961,   0.06694219548,    0.008790609714};
+	
+	static double p3[5] = {0.1788544503, 0.09359161662,0.006325387654, 0.00006611667319,-0.000002031049101};
+	static double q3[5] = {1.0         , 0.6097809921, 0.2560616665,   0.04746722384,    0.006957301675};
+	
+	static double p4[5] = {0.9874054407, 118.6723273,  849.2794360,   -743.7792444,      427.0262186};
+	static double q4[5] = {1.0         , 106.8615961,  337.6496214,    2016.712389,      1597.063511};
+	
+	static double p5[5] = {1.003675074,  167.5702434,  4789.711289,    21217.86767,     -22324.94910};
+	static double q5[5] = {1.0         , 156.9424537,  3745.310488,    9834.698876,      66924.28357};
+	
+	static double p6[5] = {1.000827619,  664.9143136,  62972.92665,    475554.6998,     -5743609.109};
+	static double q6[5] = {1.0         , 651.4101098,  56974.73333,    165917.4725,     -2815759.939};
+	
+	static double a1[3] = {0.04166666667,-0.01996527778, 0.02709538966};
+	
+	static double a2[2] = {-1.845568670,-4.284640743};
+	
+	if (xi <= 0) return 0;
+	double v = (x - x0)/xi;
+	double u, ue, us, denlan;
+	if (v < -5.5) {
+		u   = std::exp(v+1.0);
+		if (u < 1e-10) return 0.0;
+		ue  = std::exp(-1/u);
+		us  = std::sqrt(u);
+		denlan = 0.3989422803*(ue/us)*(1+(a1[0]+(a1[1]+a1[2]*u)*u)*u);
+	} else if(v < -1) {
+		u   = std::exp(-v-1);
+		denlan = std::exp(-u)*std::sqrt(u)*
+		 (p1[0]+(p1[1]+(p1[2]+(p1[3]+p1[4]*v)*v)*v)*v)/
+		 (q1[0]+(q1[1]+(q1[2]+(q1[3]+q1[4]*v)*v)*v)*v);
+	} else if(v < 1) {
+		denlan = (p2[0]+(p2[1]+(p2[2]+(p2[3]+p2[4]*v)*v)*v)*v)/
+		 (q2[0]+(q2[1]+(q2[2]+(q2[3]+q2[4]*v)*v)*v)*v);
+	} else if(v < 5) {
+		denlan = (p3[0]+(p3[1]+(p3[2]+(p3[3]+p3[4]*v)*v)*v)*v)/
+		 (q3[0]+(q3[1]+(q3[2]+(q3[3]+q3[4]*v)*v)*v)*v);
+	} else if(v < 12) {
+		u   = 1/v;
+		denlan = u*u*(p4[0]+(p4[1]+(p4[2]+(p4[3]+p4[4]*u)*u)*u)*u)/
+		 (q4[0]+(q4[1]+(q4[2]+(q4[3]+q4[4]*u)*u)*u)*u);
+	} else if(v < 50) {
+		u   = 1/v;
+		denlan = u*u*(p5[0]+(p5[1]+(p5[2]+(p5[3]+p5[4]*u)*u)*u)*u)/
+		 (q5[0]+(q5[1]+(q5[2]+(q5[3]+q5[4]*u)*u)*u)*u);
+	} else if(v < 300) {
+		u   = 1/v;
+		denlan = u*u*(p6[0]+(p6[1]+(p6[2]+(p6[3]+p6[4]*u)*u)*u)*u)/
+		 (q6[0]+(q6[1]+(q6[2]+(q6[3]+q6[4]*u)*u)*u)*u);
+	} else {
+		u   = 1/(v-v*std::log(v)/(v+1));
+		denlan = u*u*(1+(a2[0]+a2[1]*u)*u);
+	}
+	return denlan/xi;
 }
 
