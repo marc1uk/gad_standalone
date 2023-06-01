@@ -169,7 +169,7 @@ int Plotter::Execute(std::string concs_file, std::string datafiles, std::string 
 	mg_data->Add(FitStabilityData("275_A", datasetname/*, concs_file*/));  // concs_file optional
 	mg_data->Add(FitStabilityData("275_B", datasetname/*, concs_file*/));  // for validation
 	
-	///*
+	/*
 	// for comparison, plot true concentrations vs extracted concentrations
 	// (note: don't do this if passing concs_file to FitStabilityData)
 	bool ok = LoadConcentrations(concs_file);
@@ -186,7 +186,7 @@ int Plotter::Execute(std::string concs_file, std::string datafiles, std::string 
 	g_cal->SetMarkerColor(kMagenta);
 	g_cal->SetMarkerStyle(30);
 	mg_data->Add(g_cal);
-	//*/
+	*/
 	
 	/*
 	// if doing a validation plot of measured conc vs true conc, add a line of y=x
@@ -553,11 +553,11 @@ TMultiGraph* Plotter::FitStabilityData(std::string name, std::string dataset, st
 	g_concentrations_complex->SetMarkerColor(kBlue);
 	g_concentrations_complex->SetLineColor(kBlue);
 	if(name=="275_A"){
-		g_concentrations_raw->SetMarkerStyle(20);
+		g_concentrations_raw->SetMarkerStyle(20); // dots
 		g_concentrations_simple->SetMarkerStyle(20);
 		g_concentrations_complex->SetMarkerStyle(20);
 	} else if(name=="275_B"){
-		g_concentrations_raw->SetMarkerStyle(34);
+		g_concentrations_raw->SetMarkerStyle(34); // pluses
 		g_concentrations_simple->SetMarkerStyle(34);
 		g_concentrations_complex->SetMarkerStyle(34);
 	}
@@ -747,7 +747,9 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* purefit, std::m
 	// fit with pure scaled
 	std::cout<<"fitting sideband"<<std::endl;
 	g_sideband->Fit(purefit,"RNMQ");
+	
 	///*
+	// Draw to inspect pure fit
 	TCanvas ccnew("ccnew","ccnew",1024,800);
 	g_sideband->SetMarkerColor(kRed);
 	g_sideband->SetMarkerStyle(2);
