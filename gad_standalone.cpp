@@ -72,7 +72,7 @@ class Plotter{
 	bool CheckPath(std::string path, std::string& type);
 	
 	// main processing functions
-	int Execute(std::string concs_file, std::string datafiles, std::string datasetname);
+	int Execute(int step, std::string concs_file, std::string datafiles, std::string datasetname);
 	TMultiGraph* FitStabilityData(std::string name, std::string dataset, std::string calib_info_file="");
 	TMultiGraph* FitCalibrationData(std::string name, std::string purefile, std::string calib_info_file);
 	
@@ -100,28 +100,62 @@ std::string purefile;
 // Main Application
 // ================
 
-int main(){
+int main(int argc, const char** argv){
+	std::cout<<"argc: "<<argc<<std::endl;
+	if(argc==1 && argv[1]=="-h" || argv[1]=="--help"){
+		std::cout<<"usage: "<<argv[0]<<" 'calib|valid|data' <concs_file> <data_files>"<<std::endl;
+		std::cout<<"pass 'calib' to analyse calibration data, generate pure refs and calibration curves"<<std::endl;
+		std::cout<<"in this case <concs_file> should contain concentrations"<<std::endl;
+		std::cout<<"pass 'valid' to verify generated pure curves by re-analysing calibration data and plotting "
+		         <<"calculated conc vs true conc. again concs_file is required"<<std::endl;
+		std::cout<<"pass 'data' to analyse data files"<<std::endl;
+		std::cout<<"in this case if concs_file is not used and is optional"<<std::endl;
+		return 0;
+	}
 	
 	TApplication myapp("rootTApp",0,0);
 	
 	// the known concentrations for each measurement
 	std::string concs_file = "april_2023_calib/apr_2023_calibration_info.txt";
 	// pattern of data files to analyse
-	//std::string datafiles = "april_2023_calib/*.root";
-	std::string datafiles = "../GDConcMeasure/data/2023/06/00185_25_Apr_2023_EGADS_Run_031*";
+	std::string datafiles = "april_2023_calib/*.root";
+	//std::string datafiles = "../GDConcMeasure/data/2023/06/00185_25_Apr_2023_EGADS_Run_031*";
 	// 'datasetname' is unique part of the generated pure reference file name
 	// the generated pure reference file is named according to:
 	// purefile = "../GDConcMeasure/pureDarkSubtracted_"+ ledname + "_" + dataset + ".root";
 	// since it depends on the ledname, we can't pass the generated filename in directly
 	std::string datasetname="apr2023cal";
 	
+	// FIXME figure out how to make the x=y plot for validation
+	int step = 2;
+	if(argc>1){
+		if(strcmp(argv[1],"calib")==0) step=0;
+		else if(strcmp(argv[1],"valid")==0) step=1;
+		else step=2;
+	}
+	if(argc>2){
+		std::string apath = argv[2];
+		if(apath.substr(apath.length()-3,std::string::npos)=="txt"){
+			concs_file = apath;
+		} else {
+			datafiles=apath;
+		}
+	}
+	if(argc>3){
+		datafiles=argv[3];
+	}
+	if(argc>4){
+		std::cout<<"too many arguments"<<std::endl;
+		return -1;
+	}
+	
 	Plotter myplotter;
-	myplotter.Execute(concs_file, datafiles, datasetname);
+	myplotter.Execute(step, concs_file, datafiles, datasetname);
 	
 	return 0;
 }
 
-int Plotter::Execute(std::string concs_file, std::string datafiles, std::string datasetname){
+int Plotter::Execute(int step, std::string concs_file, std::string datafiles, std::string datasetname){
 	
 	std::cout<<"making chains"<<std::endl;
 	c_dark = new TChain("Dark");
@@ -145,74 +179,81 @@ int Plotter::Execute(std::string concs_file, std::string datafiles, std::string 
 	gStyle->SetPalette(kBird);
 	n_colours = TColor::GetNumberOfColors();
 	TCanvas* c1 = nullptr;
+	TMultiGraph* mg_data = new TMultiGraph("mg_data","mg_data");
+	std::string drawopts = "AP";
 	
 	// ============================================================================
 	
 	// step 1: analyse calibration data for polynomial coffiecients
 	// ------------------------------------------------------------
-	/*
-	std::cout<<"calling FitCalibrationData"<<std::endl;
-	TMultiGraph* mg_calib = new TMultiGraph("mg_data","mg_data");
-	mg_calib->Add(FitCalibrationData("275_A", datasetname, concs_file));
-	mg_calib->Add(FitCalibrationData("275_B", datasetname, concs_file));
-	
-	// display output for user
-	if(gROOT->FindObject("c1")==nullptr) c1 = new TCanvas("c1","c1",1024,800);
-	c1->cd();
-	mg_calib->Draw("AP");
-	*/
+	if(step==0){
+		std::cout<<"calling FitCalibrationData"<<std::endl;
+		mg_data->Add(FitCalibrationData("275_A", datasetname, concs_file));
+		mg_data->Add(FitCalibrationData("275_B", datasetname, concs_file));
+		mg_data->GetXaxis()->SetTitle("measurement_num");
+		mg_data->GetYaxis()->SetTitle("concentration [%Gd2SO4]");
+	}
 	
 	// step 2: analyse data to extract plots of concentration stability
 	// ----------------------------------------------------------------
-	// we can do it for each of the calibration fit methods
-	TMultiGraph* mg_data = new TMultiGraph("mg_data","mg_data");
-	mg_data->Add(FitStabilityData("275_A", datasetname/*, concs_file*/));  // concs_file optional
-	mg_data->Add(FitStabilityData("275_B", datasetname/*, concs_file*/));  // for validation
+	else {
+		std::string used_concs = concs_file;
+		if(step==2) used_concs="";  // if given, will plot measured conc vs true conc
+		mg_data->Add(FitStabilityData("275_A", datasetname, used_concs));
+		mg_data->Add(FitStabilityData("275_B", datasetname, used_concs));
+		mg_data->GetXaxis()->SetTitle("measurement_num");
+		mg_data->GetYaxis()->SetTitle("concentration [%Gd2SO4]");
+	}
+	
+	if(step==1){
+		// validation: plot measured conc vs true conc: add a line of y=x
+		bool ok = LoadConcentrations(concs_file);
+		std::vector<double> calib_concs;
+		for(auto&& acalibmeas : calibration_data){
+			calib_concs.push_back(acalibmeas.second.first);
+		}
+		std::sort(calib_concs.begin(),calib_concs.end());
+		std::vector<double> numberline(calibration_data.size());
+		std::iota(numberline.begin(),numberline.end(),0);
+		// scale numberline to range of concentrations
+		for(auto& elem : numberline) elem *= calib_concs.back()/numberline.size();
+		TGraph* g_diag = new TGraph(numberline.size(), numberline.data(), numberline.data());
+		g_diag->SetLineColor(kBlack);
+		g_diag->SetMarkerStyle(0);
+		g_diag->SetLineStyle(9);
+		mg_data->Add(g_diag);
+		drawopts ="ALP";
+		mg_data->GetXaxis()->SetTitle("True concentration [%Gd2SO4]");
+		mg_data->GetYaxis()->SetTitle("Calculated concentration [%Gd2SO4]");
+	}
 	
 	/*
-	// for comparison, plot true concentrations vs extracted concentrations
-	// (note: don't do this if passing concs_file to FitStabilityData)
-	bool ok = LoadConcentrations(concs_file);
-	std::vector<double> calib_concs;
-	for(auto&& acalibmeas : calibration_data){
-		calib_concs.push_back(acalibmeas.second.first);
+	if(step==1){
+		// alt validation mode: use FitStabilityData on calibration data, and overlay
+		// true concentration vs measurement on top of extracted conc vs measurement
+		bool ok = LoadConcentrations(concs_file);
+		std::vector<double> calib_concs;
+		for(auto&& acalibmeas : calibration_data){
+			calib_concs.push_back(acalibmeas.second.first);
+		}
+		std::sort(calib_concs.begin(),calib_concs.end());
+		std::vector<double> numberline(calib_concs.size());
+		std::iota(numberline.begin(),numberline.end(),0);
+		
+		TGraph* g_cal = new TGraph(calib_concs.size(), numberline.data(), calib_concs.data());
+		g_cal->SetTitle("true conc");
+		g_cal->SetLineColor(kMagenta);
+		g_cal->SetMarkerColor(kMagenta);
+		g_cal->SetMarkerStyle(30);
+		mg_data->Add(g_cal);
 	}
-	std::sort(calib_concs.begin(),calib_concs.end());
-	std::vector<double> numberline(calib_concs.size());
-	std::iota(numberline.begin(),numberline.end(),0);
-	TGraph* g_cal = new TGraph(calib_concs.size(), numberline.data(), calib_concs.data());
-	g_cal->SetTitle("true conc");
-	g_cal->SetLineColor(kMagenta);
-	g_cal->SetMarkerColor(kMagenta);
-	g_cal->SetMarkerStyle(30);
-	mg_data->Add(g_cal);
 	*/
-	
-	/*
-	// if doing a validation plot of measured conc vs true conc, add a line of y=x
-	bool ok = LoadConcentrations(concs_file);
-	std::vector<double> calib_concs;
-	for(auto&& acalibmeas : calibration_data){
-		calib_concs.push_back(acalibmeas.second.first);
-	}
-	std::sort(calib_concs.begin(),calib_concs.end());
-	std::vector<double> numberline(calibration_data.size());
-	std::iota(numberline.begin(),numberline.end(),0);
-	for(auto& elem : numberline) elem *= calib_concs.back()/numberline.size();
-	TGraph* g_diag = new TGraph(numberline.size(), numberline.data(), numberline.data());
-	g_diag->SetLineColor(kBlack);
-	g_diag->SetMarkerStyle(0);
-	g_diag->SetLineStyle(9);
-	mg_data->Add(g_diag);
-	*/
-	
-	// display output for user
-	if(gROOT->FindObject("c1")==nullptr) c1 = new TCanvas("c1","c1",1024,800);
-	c1->cd();
-	mg_data->Draw("ALP");
 	
 	// ============================================================================
-	
+	if(gROOT->FindObject("c1")==nullptr) c1 = new TCanvas("c1","c1",1024,800);
+	c1->cd();
+	mg_data->Draw(drawopts.c_str());
+	c1->BuildLegend();
 	while(gROOT->FindObject("c1")!=nullptr){
 		gSystem->ProcessEvents();
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -396,6 +437,7 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string dataset, 
 	fparams->Close();
 	delete fparams;
 	
+	
 	TCanvas* cc = nullptr;
 	//cc = new TCanvas("cc","cc",1024,800);
 	// drawing the tgraphs and functions here seems to kill them when we close the canvas
@@ -437,6 +479,7 @@ TMultiGraph* Plotter::FitCalibrationData(std::string name, std::string dataset, 
 		cc->Modified();
 		cc->Update();
 	}
+	
 	
 	/*
 	TGraph residuals_raw(next_graph_point);
@@ -748,7 +791,7 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* purefit, std::m
 	std::cout<<"fitting sideband"<<std::endl;
 	g_sideband->Fit(purefit,"RNMQ");
 	
-	///*
+	/*
 	// Draw to inspect pure fit
 	TCanvas ccnew("ccnew","ccnew",1024,800);
 	g_sideband->SetMarkerColor(kRed);
@@ -771,7 +814,7 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* purefit, std::m
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	}
 	std::this_thread::sleep_for(std::chrono::milliseconds(100));
-	//*/
+	*/
 	
 	std::cout<<"generating absorption graph"<<std::endl;
 	// calculate absorbance from ratio of fit to data in absorption region
@@ -1502,13 +1545,16 @@ bool Plotter::MakePure(std::string name, bool overwrite){
 	int dark_entry = GetNextDarkEntry(name, 0);
 	c_dark->GetEntry(dark_entry);
 	
-	// subtract dark
+	// subtract dark and calculate errors
+	std::vector<double> xerrs(n_datapoints,0.5*(wavelengths.at(1)-wavelengths.at(0)));
+	std::vector<double> yerrs(n_datapoints);
 	for(int j=0; j<n_datapoints; ++j){
 		values.at(j) -= values_dark.at(j);
+		yerrs.at(j) = sqrt(pow(errors.at(j),2.)+pow(errors_dark.at(j),2.));
 	}
 	
 	// make a TGraph from the data
-	TGraph graph(n_datapoints, wavelengths.data(), values.data());
+	TGraphErrors graph(n_datapoints, wavelengths.data(), values.data(), xerrs.data(), yerrs.data());
 	graph.SetName("Graph");
 	graph.SetTitle("Graph");
 	graph.SaveAs(purefile.c_str());
