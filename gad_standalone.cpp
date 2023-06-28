@@ -102,7 +102,7 @@ std::string purefile;
 
 int main(int argc, const char** argv){
 	std::cout<<"argc: "<<argc<<std::endl;
-	if(argc==1 && argv[1]=="-h" || argv[1]=="--help"){
+	if(argv[1]=="-h" || argv[1]=="--help"){
 		std::cout<<"usage: "<<argv[0]<<" 'calib|valid|data' <concs_file> <data_files>"<<std::endl;
 		std::cout<<"pass 'calib' to analyse calibration data, generate pure refs and calibration curves"<<std::endl;
 		std::cout<<"in this case <concs_file> should contain concentrations"<<std::endl;
@@ -731,17 +731,20 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* purefit, std::m
 	int dark_entry = GetNextDarkEntry(ledname, entrynum);
 	c_dark->GetEntry(dark_entry);
 	
-	// subtract dark
+	// subtract dark and calculate error
+	std::vector<double> error_values(n_datapoints);
 	for(int j=0; j<n_datapoints; ++j){
 		values.at(j) -= values_dark.at(j);
+		error_values.at(j) = sqrt(pow(errors.at(j),2.)+pow(errors_dark.at(j),2.));
 	}
 	
 	// split into in- and -out of absorbance bands
 	std::vector<double> inband_values;
 	std::vector<double> inband_wls;
-	std::vector<double> inband_errors;
+	std::vector<double> inband_yerrors;
 	std::vector<double> sideband_values;
 	std::vector<double> sideband_wls;
+	std::vector<double> sideband_yerrors;
 	std::vector<double> other_values;
 	std::vector<double> other_wls;
 	sample_273=0;
@@ -751,11 +754,12 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* purefit, std::m
 			// in band
 			inband_values.push_back(values.at(j));
 			inband_wls.push_back(wavelengths.at(j));
-			inband_errors.push_back(errors.at(j));
+			inband_yerrors.push_back(error_values.at(j));
 		} else if(wavelengths.at(j)>260 && wavelengths.at(j)<300){
 			// side band (lobes)
 			sideband_values.push_back(values.at(j));
 			sideband_wls.push_back(wavelengths.at(j));
+			sideband_yerrors.push_back(error_values.at(j));
 		} else {
 			other_values.push_back(values.at(j));
 			other_wls.push_back(wavelengths.at(j));
@@ -769,10 +773,13 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* purefit, std::m
 			sample_276 = inband_values.size()-1;
 		}
 	}
+	std::vector<double> sideband_xerrors(sideband_values.size(),wavelength_errors.at(0));
 	
 	// make TGraphErrors from data
 	TGraph* g_inband = new TGraph(inband_values.size(), inband_wls.data(), inband_values.data());
-	TGraph* g_sideband = new TGraph(sideband_values.size(), sideband_wls.data(), sideband_values.data());
+	//TGraph* g_sideband = new TGraph(sideband_values.size(), sideband_wls.data(), sideband_values.data());
+	TGraphErrors* g_sideband = new TGraphErrors(sideband_values.size(), sideband_wls.data(), sideband_values.data()
+	                                            /*, sideband_xerrors.data(), sideband_yerrors.data()*/);
 	TGraph* g_other = new TGraph(other_values.size(), other_wls.data(), other_values.data());
 	
 	std::string title = ledname+"_g";
@@ -788,10 +795,10 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* purefit, std::m
 	g_other->SetName(othertitle.c_str());
 	
 	// fit with pure scaled
-	std::cout<<"fitting sideband"<<std::endl;
+	//std::cout<<"fitting sideband"<<std::endl;
 	g_sideband->Fit(purefit,"RNMQ");
 	
-	/*
+	///*
 	// Draw to inspect pure fit
 	TCanvas ccnew("ccnew","ccnew",1024,800);
 	g_sideband->SetMarkerColor(kRed);
@@ -814,7 +821,7 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* purefit, std::m
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	}
 	std::this_thread::sleep_for(std::chrono::milliseconds(100));
-	*/
+	//*/
 	
 	std::cout<<"generating absorption graph"<<std::endl;
 	// calculate absorbance from ratio of fit to data in absorption region
@@ -832,10 +839,10 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* purefit, std::m
 		// at least in the regime where ΔX<<X. if outside this regime the non-linear
 		// nature of logs means the errors will be asymmetric. In this case one can use
 		// as a rough guide ΔY = log(X-ΔX) -> log(X+ΔX).
-		double error_on_data = inband_errors.at(k);
+		double error_on_data = inband_yerrors.at(k);
 		// uhhh what's the error on the extrapolated fit value - i.e. transmitted intensity.
 		// no idea. Let's assume it's of the same order as the data??? FIXME
-		double error_on_fitval = inband_errors.at(k);
+		double error_on_fitval = inband_yerrors.at(k);
 		double err_on_ratio = sqrt(TMath::Sq(error_on_data/dataval)
 		                          +TMath::Sq(error_on_fitval/fitval));
 		double err_on_ratio_over_ratio = err_on_ratio / (fitval/dataval);
@@ -848,7 +855,7 @@ bool Plotter::GetMetrics(std::string ledname, int entrynum, TF1* purefit, std::m
 		         <<", ratio of abs / transmitted: "<<(fitval/dataval)
 		         <<", ratio of error to value: "<<err_on_ratio_over_ratio<<std::endl;
 		*/
-		g_abs->SetPointError(k, wavelength_errors.at(0)/2., err_on_ratio_over_ratio*(1./log(10.)));
+		g_abs->SetPointError(k, wavelength_errors.at(0), err_on_ratio_over_ratio*(1./log(10.)));
 	}
 	
 	// as the simplest estimate of peak heights, just take the graph value at the peaks.
@@ -1045,7 +1052,7 @@ int Plotter::SetBranchAddresses(){
 	}
 	// fill wavevelength errors using bin widths
 	wavelength_errors.resize(n_datapoints);
-	std::fill(wavelength_errors.begin(), wavelength_errors.end(), wavelengths.at(1)-wavelengths.at(0));
+	std::fill(wavelength_errors.begin(), wavelength_errors.end(), (wavelengths.at(1)-wavelengths.at(0))/2.);
 	
 	return 1;
 }
@@ -1099,15 +1106,16 @@ TF1* Plotter::PureScaledPlusExtras(){
 	TF1* pure = new TF1(name.c_str(), PureFuncv2, wave_min, wave_max, numb_of_fitting_parameters);
 	// set default parameters
 	//pure->SetParameters(1.,1.,0.,0.,0.,0.,0.,10.);
-	pure->SetParameters(17.,0.8,1.8,-0.9,-58,-10453,4.,9.);
+	//pure->SetParameters(5.,0.8,1.8,-0.9,-58,-10453,4.,9.); // 17
+	pure->SetParameters(17.,0.9,3.4,1000.,-50.,-2000.,5.,20.);
 	
 	// set parameter limits
-	pure->SetParLimits(0,0,30);     // stretch y
-	pure->SetParLimits(1,0.8,1.2);  // stretch x
+	pure->SetParLimits(0,0,20);     // stretch y
+	pure->SetParLimits(1,0.5,1.2);  // stretch x
 	pure->SetParLimits(2,-20,20);   // x offset
-	pure->SetParLimits(3,-10,10);   // y offset
+	pure->SetParLimits(3,-3000,3000);   // y offset
 	pure->SetParLimits(4,-500,10);   // linear baseline gradient
-	pure->SetParLimits(5,-15000,500); // shoulder gaussian amplitude XXX reduce
+	pure->SetParLimits(5,-30000,500); // shoulder gaussian amplitude XXX reduce
 	pure->SetParLimits(6,0,60);     // shoulder gaussian position - 282
 	pure->SetParLimits(7,0,50);     // shoulder gaussian width
 	
